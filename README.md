@@ -42,8 +42,8 @@ DerpDerp/
 - [12. The modifiers](#12-the-modifiers)
 - [13. The quota readout](#13-the-quota-readout)
 
-**Part III — Troubleshooting**
-- [Something broke? Ask a robot](#part-iii--troubleshooting)
+**Part III — Troubleshoot it**
+- [Something broke? Ask a robot](#part-iii--troubleshoot-it)
 
 **Reference**
 - [A. Config block reference](#appendix-a--config-block-reference)
@@ -297,7 +297,7 @@ DerpDerp adds a small .json file to your machine to tally up its calls to Gemini
 
 ---
 
-## PART III — TROUBLESHOOTING
+## PART III — TROUBLESHOOT IT
 
 Something broke, or you want to change how DerpDerp works? Head to the [`troubleshooting/`](troubleshooting/) folder. It's got a ready-made prompt and a technical rundown to hand your LLM, lol. Let the robot fix the robot.
 
@@ -361,7 +361,7 @@ launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.derpderp.agent.pl
 
 ### Appendix E — Errors with explanations
 
-For most of your troubleshooting needs, see [troubleshooting](#part-iii--troubleshooting).
+For most of your troubleshooting needs, see [troubleshooting](#part-iii--troubleshoot-it).
 
 For the few straightforward things I expect to go wrong, here's a cheatsheet:
 
