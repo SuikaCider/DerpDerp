@@ -1,5 +1,7 @@
 # DerpDerp
 
+![The DerpDerp panel, showing its modifier legend: ␣ Check Wikipedia · \ Ask Groq · \\ Ask Gemini · /help for more](assets/ShowShowDerpDerp.jpg)
+
 DerpDerp is a spotlight-like search tool for getting quick answers to simple queries. Press right ⌘ twice, ask a simple question with a clear answer, and get a quick response from Wikipedia, Tavily (the web), and/or an LLM.
 
 This setup doc assumes you're a clueless vibe coder like me. It's pretty hand-holdy because I assume I'll need to reference it. 
