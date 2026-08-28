@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-quickask — a Spotlight-style floating quick-answer panel for macOS.
+derpderp — a Spotlight-style floating quick-answer panel for macOS.
 
 A background agent with no Dock icon and no app-switcher entry.
 Double-tap Right Command (⌘) to open, Escape to dismiss.
@@ -78,7 +78,7 @@ from Foundation import NSObject, NSAttributedString
 #  CONFIG  ───  EDIT THIS SECTION
 # ============================================================================
 
-# --- API keys: paste yours between the quotes -------------------------------
+# --- API keys: paste yours between the quotes on lines 90, 91, 92-------------------------------
 #   Groq   (required): free key at  https://console.groq.com     → "gsk_..."
 #   Tavily (optional): free key at  https://app.tavily.com       → "tvly-..."
 #                      (enables the \s live web-search modifier)
@@ -106,8 +106,8 @@ RIGHT_CMD_KEYCODE  = 54        # double-tap this key to toggle (54 = Right ⌘)
 DOUBLE_TAP_TIMEOUT = 0.4       # max seconds between the two taps
 
 # --- Local files (fine to leave as-is) --------------------------------------
-USAGE_FILE = os.path.expanduser("~/.cache/quickask_usage.json")
-LOCK_FILE  = os.path.expanduser("~/.cache/quickask.lock")
+USAGE_FILE = os.path.expanduser("~/.cache/derpderp_usage.json")
+LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
 
 # ============================================================================
 #  END OF CONFIG  ───  you shouldn't need to edit below here
@@ -228,7 +228,7 @@ def usage_count(name, period_key):
 # ---------------------------------------------------------------- web search
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
-WIKI_UA = {"User-Agent": "quickask/1.0 (personal quick-answer overlay)"}
+WIKI_UA = {"User-Agent": "derpderp/1.0 (personal quick-answer overlay)"}
 
 
 def wiki_search(query, max_titles=3, char_cap=1200, timeout=15):
@@ -375,7 +375,7 @@ def stream_openai(url, key, model, messages, on_chunk, on_done, extra_headers=No
     headers = {
         "content-type": "application/json",
         "authorization": "Bearer " + key,
-        "User-Agent": "quickask/1.0",
+        "User-Agent": "derpderp/1.0",
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -948,7 +948,7 @@ def _acquire_single_instance():
 
 def main():
     if not _acquire_single_instance():
-        print("quickask is already running; exiting this instance.")
+        print("derpderp is already running; exiting this instance.")
         return
 
     app = NSApplication.sharedApplication()
@@ -982,25 +982,25 @@ if __name__ == "__main__":
 # Create a LaunchAgent so the panel is always running after you log in. In a
 # terminal, run these (they fill in your own username/paths automatically):
 #
-#   PLIST="$HOME/Library/LaunchAgents/com.quickask.agent.plist"
+#   PLIST="$HOME/Library/LaunchAgents/com.derpderp.agent.plist"
 #   PY="$(command -v python3)"
 #   SCRIPT="$HOME/path/to/derpderp.py"   # <- adjust to where you saved it
 #   cat > "$PLIST" <<EOF
 #   <?xml version="1.0" encoding="UTF-8"?>
 #   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 #   <plist version="1.0"><dict>
-#     <key>Label</key><string>com.quickask.agent</string>
+#     <key>Label</key><string>com.derpderp.agent</string>
 #     <key>ProgramArguments</key><array><string>$PY</string><string>$SCRIPT</string></array>
 #     <key>RunAtLoad</key><true/>
 #     <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 #     <key>ProcessType</key><string>Interactive</string>
-#     <key>StandardOutPath</key><string>$HOME/Library/Logs/quickask.log</string>
-#     <key>StandardErrorPath</key><string>$HOME/Library/Logs/quickask.log</string>
+#     <key>StandardOutPath</key><string>$HOME/Library/Logs/derpderp.log</string>
+#     <key>StandardErrorPath</key><string>$HOME/Library/Logs/derpderp.log</string>
 #   </dict></plist>
 #   EOF
 #   launchctl bootstrap gui/$(id -u) "$PLIST"
 #
 # To reload after editing this file:
-#   launchctl kickstart -k gui/$(id -u)/com.quickask.agent
+#   launchctl kickstart -k gui/$(id -u)/com.derpderp.agent
 # To turn it off:
-#   launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.quickask.agent.plist"
+#   launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.derpderp.agent.plist"
