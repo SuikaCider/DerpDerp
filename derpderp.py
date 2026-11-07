@@ -32,6 +32,7 @@ SETUP (3 steps)
 """
 
 import os
+import ctypes
 import fcntl
 import json
 import shlex
@@ -42,6 +43,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import objc
 from AppKit import (
@@ -70,6 +72,7 @@ from AppKit import (
     NSTextView,
     NSVisualEffectView,
     NSFontWeightSemibold,
+    NSBaselineOffsetAttributeName,
     NSMutableParagraphStyle,
     NSParagraphStyle,
     NSParagraphStyleAttributeName,
@@ -81,6 +84,7 @@ from AppKit import (
     NSWindowStyleMaskNonactivatingPanel,
 )
 from Foundation import NSObject, NSAttributedString, NSMutableAttributedString
+from PyObjCTools import AppHelper
 
 # ============================================================================
 #  CONFIG  ───  EDIT THIS SECTION
@@ -183,10 +187,36 @@ PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "%s:streamGenerateContent?alt=sse&key=%s" % (GEMINI_MODEL, GEMINI_API_KEY)
-)
+    "%s:streamGenerateContent?alt=sse" % GEMINI_MODEL
+)   # the key travels in the x-goog-api-key header, never in the URL
+
+
+def _redact(text):
+    """Blank out any API key that an error message might echo."""
+    for key in (GROQ_API_KEY, TAVILY_API_KEY, GEMINI_API_KEY):
+        if key:
+            text = text.replace(key, "•••")
+    return text
+
 
 ESCAPE_KEYCODE = 53
+# Which bit of an event's modifier flags is THIS physical key (left and right ⌘
+# share the plain Command flag, so that flag can't tell them apart).
+DEVICE_MASKS = {54: 0x10, 55: 0x08, 56: 0x02, 60: 0x04, 58: 0x20, 61: 0x40, 59: 0x01, 62: 0x2000}
+
+try:   # macOS's running count of key presses, system-wide: no extra install needed
+    _cg = ctypes.CDLL("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+    _cg.CGEventSourceCounterForEventType.restype = ctypes.c_uint32
+    _cg.CGEventSourceCounterForEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+except OSError:
+    _cg = None
+
+
+def keydown_count():
+    """How many keys have been pressed since boot (None if unknown). A tap of the
+    hotkey only counts when this hasn't moved, i.e. no shortcut was typed with it."""
+    return _cg.CGEventSourceCounterForEventType(1, 10) if _cg else None   # HID state, key-down
+
 EDIT_SHORTCUTS = {"a": "selectAll:", "c": "copy:", "v": "paste:", "x": "cut:"}
 
 PANEL_W = 620
@@ -194,6 +224,7 @@ INPUT_H = 54        # height of the question bar
 FIELD_H = 28       # natural height of the text field, centered within the bar
 ANSWER_H = 380
 SIDE = 16          # horizontal inset shared by input, separator and answer text
+PLACEHOLDER_DROP = -4.0   # points the placeholder sits lower than its natural spot
 
 SYSTEM = (
     "You are a Spotlight-style quick answer overlay. "
@@ -224,7 +255,7 @@ HELP = (
         "`\\`\tGroq response; no wikipedia, no search",
         "`\\\\`\tGemini response; no wikipedia, no search",
     )),
-    ("MODIFIERS", "(directly to `\\` or `\\\\`)", (
+    ("MODIFIERS", "(Append directly to `\\` or `\\\\`)", (
         "`s`\tAdd web search via Tavily",
         "`d`\tDirect plaintext answer, should be pastable",
     )),
@@ -234,7 +265,7 @@ HELP = (
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
     )),
 )
-HELP_COLUMN = 30   # points from the text's left edge to where explanations start
+HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
 
 
 def body_attributes():
@@ -250,9 +281,17 @@ def help_attributed():
     """HELP as styled text: bigger headers, grey modifiers, aligned explanations."""
     body = NSFont.systemFontOfSize_(14)
     head = NSFont.systemFontOfSize_weight_(17, NSFontWeightSemibold)
+    # Modifiers sit indented under their header by the same space that follows
+    # the widest of them, so only headers touch the left margin.
+    widest = max(
+        NSAttributedString.alloc().initWithString_attributes_(
+            line.split("`")[1], {NSFontAttributeName: body}).size().width
+        for _, _, lines in HELP for line in lines if line.startswith("`"))
+    indent = round(HELP_COLUMN - widest)
     rows = NSMutableParagraphStyle.alloc().init()
-    rows.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(0, HELP_COLUMN, {})])
-    rows.setHeadIndent_(HELP_COLUMN)   # a wrapped explanation stays in its column
+    rows.setFirstLineHeadIndent_(indent)
+    rows.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(0, indent + HELP_COLUMN, {})])
+    rows.setHeadIndent_(indent + HELP_COLUMN)   # a wrapped explanation stays in its column
     out = NSMutableAttributedString.alloc().init()
 
     def add(text, font, para, grey=False):
@@ -301,8 +340,9 @@ def _system_prompt(direct=False):
 # per period. Groq's remaining count is read live from its response headers.
 
 
-def _today_key():
-    return datetime.now().astimezone().strftime("%Y-%m-%d")
+def _gemini_day_key():
+    """Gemini's free daily quota resets at midnight Pacific time, not local."""
+    return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
 
 
 def _month_key():
@@ -403,13 +443,14 @@ def wiki_search(query, max_titles=3, char_cap=1200, timeout=15):
 def tavily_search(query, max_results=5, char_cap=800, timeout=20):
     """Live web search via Tavily (needs TAVILY_API_KEY; 1000/mo free).
 
-    Returns a plain-text context block (answer summary + top results), or ""
-    if there's no key or the call fails. Unlike Wikipedia this covers current
-    events, prices, weather, etc.
+    Returns (context, problem): a plain-text context block (answer summary + top
+    results) and "" — or "" and a short reason when there's no key, the call
+    fails, or nothing came back. Unlike Wikipedia this covers current events,
+    prices, weather, etc.
     """
     key = TAVILY_API_KEY
     if not key:
-        return ""
+        return "", "no Tavily key"
     body = json.dumps(
         {
             "query": query,
@@ -425,26 +466,32 @@ def tavily_search(query, max_results=5, char_cap=800, timeout=20):
     )
     try:
         data = json.load(urllib.request.urlopen(req, timeout=timeout))
-        bump_usage("tavily", _month_key())  # a credit is spent on any 200
-        blocks = []
-        if data.get("answer"):
-            blocks.append("Summary: " + data["answer"])
-        for r in data.get("results", []):
-            blocks.append(
-                "## %s\n%s\n<%s>"
-                % (r.get("title", ""), (r.get("content") or "")[:char_cap], r.get("url", ""))
-            )
-        return "\n\n".join(blocks)
-    except Exception:
-        return ""
+    except urllib.error.HTTPError as e:
+        return "", "Tavily error %s%s" % (e.code, " (monthly quota?)" if e.code in (429, 432) else "")
+    except Exception as e:
+        return "", _redact("Tavily unreachable: %s" % e)
+    bump_usage("tavily", _month_key())  # a credit is spent on any 200
+    blocks = []
+    if data.get("answer"):
+        blocks.append("Summary: " + data["answer"])
+    for r in data.get("results", []):
+        blocks.append(
+            "## %s\n%s\n<%s>"
+            % (r.get("title", ""), (r.get("content") or "")[:char_cap], r.get("url", ""))
+        )
+    return ("\n\n".join(blocks), "") if blocks else ("", "Tavily found nothing")
 
 
 def web_search(query, live=False):
-    """Fetch context for a question. live=True prefers Tavily (current events),
-    falling back to Wikipedia; live=False uses Wikipedia only."""
+    """Fetch context for a question. Returns (context, note): live=True prefers
+    Tavily (current events) and falls back to Wikipedia, saying so in `note`;
+    live=False uses Wikipedia only."""
     if live:
-        return tavily_search(query) or wiki_search(query)
-    return wiki_search(query)
+        context, problem = tavily_search(query)
+        if context:
+            return context, ""
+        return wiki_search(query), "[live search unavailable (%s): used Wikipedia instead]" % problem
+    return wiki_search(query), ""
 
 
 # ---------------------------------------------------------------- LLM
@@ -453,13 +500,15 @@ def web_search(query, live=False):
 # role "user"/"model"). llm_stream() picks Groq when its key is present.
 
 
-def llm_stream(messages, on_chunk, on_done, stats=None, engine="auto", direct=False):
-    """Stream an answer from the chosen engine.
+def llm_stream(messages, on_chunk, stats=None, engine="auto", direct=False):
+    """Stream an answer from the chosen engine; return (text, status, note).
 
     engine="auto" prefers Groq when its key is present, else Gemini;
     engine="gemini" forces Gemini (the \\\\ lane). direct=True asks for a bare,
     paste-ready answer. `stats` is populated with which engine ran and, for Groq,
-    the remaining counts from the headers.
+    the remaining counts from the headers. status is "ok" (a complete answer),
+    "interrupted" (cut off part-way), "blocked" (refused by the service) or
+    "failed"; `note` says why when it isn't "ok".
     """
     groq_key = GROQ_API_KEY
     if engine == "auto":
@@ -468,15 +517,23 @@ def llm_stream(messages, on_chunk, on_done, stats=None, engine="auto", direct=Fa
     if engine == "groq" and groq_key:
         if stats is not None:
             stats["engine"] = "groq"
-        stream_openai(GROQ_URL, groq_key, GROQ_MODEL, messages, on_chunk, on_done,
-                      stats=stats, direct=direct)
-    else:
-        if stats is not None:
-            stats["engine"] = "gemini"
-        stream(messages, on_chunk, on_done, stats=stats, direct=direct)
+        return stream_openai(GROQ_URL, groq_key, GROQ_MODEL, messages, on_chunk,
+                             stats=stats, direct=direct)
+    if stats is not None:
+        stats["engine"] = "gemini"
+    return stream(messages, on_chunk, stats=stats, direct=direct)
 
 
-def stream_openai(url, key, model, messages, on_chunk, on_done, extra_headers=None,
+def _error_body(e):
+    """An HTTP error's body text, or "" if even reading it fails (A1: that read
+    used to escape the handler and leave the panel refusing every question)."""
+    try:
+        return e.read().decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
+def stream_openai(url, key, model, messages, on_chunk, extra_headers=None,
                   retries=2, stats=None, direct=False):
     """Stream from any OpenAI-compatible chat endpoint (Groq, OpenRouter, …)."""
     oai_messages = [{"role": "system", "content": _system_prompt(direct)}]
@@ -494,9 +551,9 @@ def stream_openai(url, key, model, messages, on_chunk, on_done, extra_headers=No
     if extra_headers:
         headers.update(extra_headers)
 
-    collected = []
+    collected, status, note = [], "failed", ""
     for attempt in range(retries):
-        collected = []
+        collected, finished = [], False
         req = urllib.request.Request(url, data=body, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=90) as resp:
@@ -518,34 +575,66 @@ def stream_openai(url, key, model, messages, on_chunk, on_done, extra_headers=No
                     if not line.startswith("data:"):
                         continue
                     payload = line[5:].strip()
-                    if not payload or payload == "[DONE]":
+                    if payload == "[DONE]":
+                        finished = True
+                        continue
+                    if not payload:
                         continue
                     try:
                         event = json.loads(payload)
                     except json.JSONDecodeError:
                         continue
+                    if "error" in event:   # the service reports a failure mid-stream
+                        err = event["error"]
+                        msg = err.get("message", err) if isinstance(err, dict) else err
+                        return "".join(collected), "failed", _redact("[error] %s" % msg)
                     try:
-                        text = event["choices"][0]["delta"].get("content")
+                        choice = event["choices"][0]
+                        text = choice["delta"].get("content")
                         if text:
                             collected.append(text)
                             on_chunk(text)
+                        reason = choice.get("finish_reason")
+                        if reason == "stop":
+                            finished = True
+                        elif reason == "length":
+                            note = "[answer hit the length limit]"
+                        elif reason:
+                            return "".join(collected), "blocked", "[answer stopped: %s]" % reason
                     except (KeyError, IndexError):
                         pass
-            break
+            if finished and not note:
+                return "".join(collected), "ok", ""
+            return "".join(collected), "interrupted", note or "[answer cut off]"
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < retries - 1:
                 on_chunk("[rate limited, retrying in 3s…]\n")
                 time.sleep(3)
                 continue
-            on_chunk("[HTTP %s] %s" % (e.code, e.read().decode("utf-8", "replace")[:200]))
-            break
+            return "", "failed", _redact("[HTTP %s] %s" % (e.code, _error_body(e)[:200]))
         except Exception as e:
-            on_chunk("[error] %s" % e)
-            break
+            return "".join(collected), ("interrupted" if collected else "failed"), _redact("[error] %s" % e)
+    return "".join(collected), status, note
 
-    on_done("".join(collected))
 
-def stream(messages, on_chunk, on_done, retries=2, stats=None, direct=False):
+def _gemini_429_message(body_txt):
+    """A daily-quota 429 says so; a per-minute one says to wait (A10)."""
+    daily, delay = False, ""
+    try:
+        for detail in json.loads(body_txt).get("error", {}).get("details", []):
+            for v in detail.get("violations", []):
+                if "PerDay" in v.get("quotaId", ""):
+                    daily = True
+            delay = detail.get("retryDelay", delay)
+    except (ValueError, AttributeError):
+        pass
+    if daily:
+        return ("[HTTP 429] Gemini free-tier daily quota reached "
+                "(%d requests/day). Try again tomorrow." % GEMINI_DAILY_LIMIT)
+    return "[HTTP 429] Gemini is rate limiting; try again in %s." % (delay or "a minute")
+
+
+def stream(messages, on_chunk, retries=2, stats=None, direct=False):
     """Stream an answer from the Gemini API (fallback engine).
 
     No Google Search grounding is attached — it's 0-quota on the free tier for
@@ -556,17 +645,19 @@ def stream(messages, on_chunk, on_done, retries=2, stats=None, direct=False):
         "contents": messages,
     }
     body = json.dumps(request_body).encode()
-    collected = []
+    headers = {"content-type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
 
+    collected = []
     for attempt in range(retries):
         # Discard any partial text from a failed earlier attempt so the answer
         # stored in history only reflects the successful stream.
-        collected = []
-        req = urllib.request.Request(
-            GEMINI_URL, data=body, headers={"content-type": "application/json"}
-        )
+        collected, finished, note = [], False, ""
+        req = urllib.request.Request(GEMINI_URL, data=body, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=90) as resp:
+                # Counted once Gemini accepts the request, whether or not the
+                # answer then finishes downloading (A11).
+                bump_usage("gemini", _gemini_day_key())
                 for raw in resp:
                     line = raw.decode("utf-8", "replace").strip()
                     if not line.startswith("data:"):
@@ -578,37 +669,44 @@ def stream(messages, on_chunk, on_done, retries=2, stats=None, direct=False):
                         event = json.loads(payload)
                     except json.JSONDecodeError:
                         continue
-
+                    if "error" in event:
+                        msg = event["error"].get("message", "") if isinstance(event["error"], dict) else event["error"]
+                        return "".join(collected), "failed", _redact("[error] %s" % msg)
+                    blocked = event.get("promptFeedback", {}).get("blockReason")
+                    if blocked:
+                        return "", "blocked", "[Gemini blocked this question: %s]" % blocked
                     try:
-                        text = event["candidates"][0]["content"]["parts"][0]["text"]
-                        if text:
+                        candidate = event["candidates"][0]
+                    except (KeyError, IndexError):
+                        continue
+                    # Every visible text part, in order (A8); thought parts are internal.
+                    for part in candidate.get("content", {}).get("parts", []):
+                        text = part.get("text")
+                        if text and not part.get("thought"):
                             collected.append(text)
                             on_chunk(text)
-                    except (KeyError, IndexError):
-                        pass
-            # Success: break out of the retry loop
-            bump_usage("gemini", _today_key())
-            break
-
+                    reason = candidate.get("finishReason")
+                    if reason == "STOP":
+                        finished = True
+                    elif reason == "MAX_TOKENS":
+                        note = "[answer hit the length limit]"
+                    elif reason:
+                        return "".join(collected), "blocked", "[Gemini stopped this answer: %s]" % reason
+            if finished and not note:
+                return "".join(collected), "ok", ""
+            return "".join(collected), "interrupted", note or "[answer cut off]"
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < retries - 1:
                 on_chunk("[rate limited, retrying in 3s…]\n")
                 time.sleep(3)
                 continue
-            body_txt = e.read().decode("utf-8", "replace")
+            body_txt = _error_body(e)
             if e.code == 429:
-                on_chunk(
-                    "[HTTP 429] Gemini free-tier daily quota reached "
-                    "(%d requests/day). Try again tomorrow." % GEMINI_DAILY_LIMIT
-                )
-            else:
-                on_chunk("[HTTP %s] %s" % (e.code, body_txt[:200]))
-            break
+                return "", "failed", _gemini_429_message(body_txt)
+            return "", "failed", _redact("[HTTP %s] %s" % (e.code, body_txt[:200]))
         except Exception as e:
-            on_chunk("[error] %s" % e)
-            break
-
-    on_done("".join(collected))
+            return "".join(collected), ("interrupted" if collected else "failed"), _redact("[error] %s" % e)
+    return "".join(collected), "failed", ""
 
 
 # ---------------------------------------------------------------- panel
@@ -629,7 +727,12 @@ class Controller(NSObject):
         self.messages = []
         self.answering = False
         self.last_answer = ""
-        self.last_right_cmd_time = 0.0
+        self.session = 0          # bumped on every open; older requests' output is dropped
+        self.hotkey_down = False  # is the hotkey itself held right now?
+        self.press_time = 0.0     # when it went down, and the key-press count then
+        self.press_keys = None
+        self.tap_time = 0.0       # the last clean tap (0 = none pending)
+        self.tap_keys = None
         self._build()
         return self
 
@@ -680,6 +783,9 @@ class Controller(NSObject):
                 {
                     NSFontAttributeName: NSFont.systemFontOfSize_(13),
                     NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+                    # The 13pt hint draws at the top of a field sized for 20pt
+                    # text; lower it to the middle of the bar.
+                    NSBaselineOffsetAttributeName: PLACEHOLDER_DROP,
                 },
             )
         )
@@ -767,6 +873,10 @@ class Controller(NSObject):
     # ---- show / hide
     @objc.python_method
     def show(self):
+        # A request still running from before Escape is abandoned: its output is
+        # dropped (see _on_main) and new questions work at once.
+        self.session += 1
+        self.answering = False
         self.messages = []
         self.last_answer = ""
         self.answer.setString_("")
@@ -852,65 +962,94 @@ class Controller(NSObject):
         else:
             indicator = "\ud83d\udd0e Asking Groq\u2026"
 
-        self.answering = True
-        self.input.setStringValue_("")
-
-        self.messages.append({"role": "user", "parts": [{"text": question}]})
+        self._begin()
+        session = self.session
+        user_msg = {"role": "user", "parts": [{"text": question}]}
+        self.messages.append(user_msg)
 
         prefix = "\n\n" if self.answer.string() else ""
         self.appendText_("%s\u203a %s\n\n" % (prefix, question))
         self._grow()
 
         def chunk(text):
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "appendText:", text, False
-            )
-
-        def done(full):
-            self.messages.append({"role": "model", "parts": [{"text": full}]})
-            self.answering = False
-            if full.strip():
-                self.last_answer = full.strip()
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    "showCopyButton:", None, False
-                )
+            self._on_main(session, self.appendText_, text)
 
         def worker():
-            # Build the request history; when searching, augment only the copy
-            # sent to the model so the stored history stays the clean question.
-            api_messages = [dict(m) for m in self.messages]
-            chunk(indicator + "\n\n")
-            if search in ("wiki", "web"):
-                context = web_search(question, live=(search == "web"))
-                if context:
-                    augmented = (
-                        "Web results:\n%s\n\n"
-                        "Using the results above, answer: %s" % (context, question)
-                    )
-                    api_messages[-1] = {"role": "user", "parts": [{"text": augmented}]}
-                else:
-                    chunk("[no web results \u2014 answering from general knowledge]\n\n")
-
-            stats = {}
-            llm_stream(api_messages, chunk, done, stats=stats, engine=engine, direct=direct)
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "appendFooter:", self._quota_footer(stats, search), False
-            )
+            text, status, note, footer = "", "failed", "", ""
+            try:
+                # Build the request history; when searching, augment only the copy
+                # sent to the model so the stored history stays the clean question.
+                api_messages = [dict(m) for m in self.messages if m is not user_msg] + [user_msg]
+                chunk(indicator + "\n\n")
+                if search in ("wiki", "web"):
+                    context, search_note = web_search(question, live=(search == "web"))
+                    if search_note:
+                        chunk(search_note + "\n\n")
+                    if context:
+                        augmented = (
+                            "Web results:\n%s\n\n"
+                            "Using the results above, answer: %s" % (context, question)
+                        )
+                        api_messages[-1] = {"role": "user", "parts": [{"text": augmented}]}
+                    else:
+                        chunk("[no web results \u2014 answering from general knowledge]\n\n")
+                stats = {}
+                text, status, note = llm_stream(api_messages, chunk, stats=stats,
+                                                engine=engine, direct=direct)
+                footer = self._quota_footer(stats, search)
+            except Exception as e:   # whatever happens, the panel is released below
+                note = _redact("[error] %s" % e)
+            finally:
+                self._on_main(session, self._finish_answer, user_msg, text, status, note, footer)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @objc.python_method
+    def _begin(self):
+        """Start an operation: busy, field cleared, and no stale answer to copy (A6)."""
+        self.answering = True
+        self.input.setStringValue_("")
+        self.last_answer = ""
+        self.copybtn.setHidden_(True)
+
+    @objc.python_method
+    def _on_main(self, session, func, *args):
+        """Run func(*args) on the main thread, unless the panel was reopened since
+        `session` began (A2): an abandoned request never writes into a new one."""
+        def run():
+            if session == self.session:
+                func(*args)
+        AppHelper.callAfter(run)
+
+    @objc.python_method
+    def _finish_answer(self, user_msg, text, status, note, footer):
+        """Everything that ends a question, in one main-thread step (A4)."""
+        if status == "ok" and text.strip():
+            self.messages.append({"role": "model", "parts": [{"text": text}]})
+            self.last_answer = text.strip()
+            self.copybtn.setHidden_(False)
+        else:
+            # Not a complete answer (A7): shown, but neither kept for follow-ups nor copyable.
+            if self.messages and self.messages[-1] is user_msg:
+                self.messages.pop()
+            if note:
+                self.appendText_(("\n\n" if text else "") + note)
+        self.appendFooter_(footer)
+        self.answering = False
 
     @objc.python_method
     def _run_percent(self, line):
         """Run PERCENT_COMMAND with `line` as its last argument and show what it printed."""
         if not line:
             return
-        self.answering = True
-        self.input.setStringValue_("")
+        self._begin()
+        session = self.session
         prefix = "\n\n" if self.answer.string() else ""
         self.appendText_("%s\u203a %% %s\n\n" % (prefix, line))
         self._grow()
 
         def worker():
+            out = "% command failed"
             try:
                 if not PERCENT_COMMAND:
                     out = "% lines are off: set PERCENT_COMMAND in CONFIG."
@@ -922,12 +1061,14 @@ class Controller(NSObject):
             except Exception as e:  # a bad command must never leave the panel stuck
                 out = "%% command failed: %s" % e
             finally:
-                self.answering = False
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                "appendText:", out + "\n", False
-            )
+                self._on_main(session, self._finish_percent, out)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @objc.python_method
+    def _finish_percent(self, out):
+        self.appendText_(out + "\n")
+        self.answering = False
 
     @objc.python_method
     def _quota_footer(self, stats, search):
@@ -952,7 +1093,7 @@ class Controller(NSObject):
                     pass
                 bits.append(seg)
         elif stats.get("engine") == "gemini":
-            left = max(0, GEMINI_DAILY_LIMIT - usage_count("gemini", _today_key()))
+            left = max(0, GEMINI_DAILY_LIMIT - usage_count("gemini", _gemini_day_key()))
             bits.append("Gemini ~%d/%d req today" % (left, GEMINI_DAILY_LIMIT))
 
         if search == "web" and TAVILY_API_KEY:
@@ -998,9 +1139,6 @@ class Controller(NSObject):
         self.answer.scrollRangeToVisible_((storage.length(), 0))
 
     # ---- copy answer
-
-    def showCopyButton_(self, _):
-        self.copybtn.setHidden_(False)
 
     def copyAnswer_(self, sender):
         """Copy the last answer and briefly flash the button to confirm."""
@@ -1071,14 +1209,29 @@ class Controller(NSObject):
 
     @objc.python_method
     def check_double_tap(self, event):
-        if event.keyCode() == RIGHT_CMD_KEYCODE:
-            if event.modifierFlags() & NSEventModifierFlagCommand:
-                now = time.time()
-                if now - self.last_right_cmd_time < DOUBLE_TAP_TIMEOUT:
-                    self.toggle()
-                    self.last_right_cmd_time = 0.0
-                else:
-                    self.last_right_cmd_time = now
+        """Toggle on two quick, clean taps of the hotkey (A5). A tap is the hotkey
+        itself going down and up with no other key typed meanwhile, so ⌘C / ⌘V
+        typed with it, or the other ⌘ held down, never count."""
+        if event.keyCode() != RIGHT_CMD_KEYCODE:
+            self.tap_time = 0.0   # another modifier moved: not a clean double tap
+            return
+        mask = DEVICE_MASKS.get(RIGHT_CMD_KEYCODE)
+        down = bool(event.modifierFlags() & mask) if mask else not self.hotkey_down
+        if down == self.hotkey_down:
+            return
+        self.hotkey_down = down
+        now, keys = time.time(), keydown_count()
+        if down:
+            if self.tap_time and now - self.tap_time < DOUBLE_TAP_TIMEOUT and keys == self.tap_keys:
+                self.tap_time = 0.0
+                self.toggle()
+            else:
+                self.tap_time = 0.0
+                self.press_time, self.press_keys = now, keys
+        elif keys == self.press_keys:   # released with nothing typed: one clean tap
+            self.tap_time, self.tap_keys = self.press_time, keys
+        else:
+            self.tap_time = 0.0
 
     @objc.python_method
     def global_flags(self, event):
