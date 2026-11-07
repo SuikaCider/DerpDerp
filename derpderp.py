@@ -10,8 +10,13 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \         Groq answer, no search
     \\        Gemini answer, no search
     \s \\s    add a live web search via Tavily
-    \d \\d    direct: a bare, paste-ready plaintext answer
+    \w \\w    add a Wiktionary lookup (meanings, IPA, etymology)
+    \d \\d    direct: a bare, paste-ready plaintext answer, copied for you
+    \c \\c    copy the answer to the clipboard when it's done
+    \p \\p    send your clipboard along with the question
     %         hand the line to your own command (optional: PERCENT_COMMAND in CONFIG)
+Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
+⌘↩ copies the last answer and closes, /history shows the last 10 answers.
 
 ──────────────────────────────────────────────────────────────────────────
 SETUP (3 steps)
@@ -35,6 +40,7 @@ import os
 import ctypes
 import fcntl
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -60,6 +66,7 @@ from AppKit import (
     NSFontManager,
     NSForegroundColorAttributeName,
     NSItalicFontMask,
+    NSLinkAttributeName,
     NSBox,
     NSEventMaskKeyDown,
     NSMakeRect,
@@ -83,7 +90,7 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSObject, NSAttributedString, NSMutableAttributedString
+from Foundation import NSObject, NSAttributedString, NSMutableAttributedString, NSURL
 from PyObjCTools import AppHelper
 
 # ============================================================================
@@ -120,6 +127,11 @@ DOUBLE_TAP_TIMEOUT = 0.4       # max seconds between the two taps
 # --- Local files (fine to leave as-is) --------------------------------------
 USAGE_FILE = os.path.expanduser("~/.cache/derpderp_usage.json")
 LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
+# Every finished answer is appended here as "Q: ..." / "A: ..." (blank = no history).
+HISTORY_FILE = os.path.expanduser("~/.cache/derpderp_history.txt")
+
+# --- Panel ------------------------------------------------------------------
+KEEP_ANSWER_MINUTES = 5        # reopen within this long and the last answer is still there
 
 # --- `% ` lines (optional; blank = off) --------------------------------------
 # A line typed as `% buy milk` runs this command with "buy milk" added as its
@@ -200,6 +212,7 @@ def _redact(text):
 
 
 ESCAPE_KEYCODE = 53
+RETURN_KEYCODES = (36, 76)   # Return, and Enter on a numeric keypad
 # Which bit of an event's modifier flags is THIS physical key (left and right ⌘
 # share the plain Command flag, so that flag can't tell them apart).
 DEVICE_MASKS = {54: 0x10, 55: 0x08, 56: 0x02, 60: 0x04, 58: 0x20, 61: 0x40, 59: 0x01, 62: 0x2000}
@@ -257,7 +270,16 @@ HELP = (
     )),
     ("MODIFIERS", "(Append directly to `\\` or `\\\\`)", (
         "`s`\tAdd web search via Tavily",
-        "`d`\tDirect plaintext answer, should be pastable",
+        "`w`\tAdd Wiktionary (meanings, IPA, etymology)",
+        "`d`\tDirect plaintext answer; copies itself to your clipboard",
+        "`c`\tCopy the answer to your clipboard when it's done",
+        "`p`\tSend your clipboard along with the question",
+        "\tCombine them in any order: `\\wc ipa of prendre`",
+    )),
+    ("SHORTCUTS", "", (
+        "`↑`\tRecall your earlier questions",
+        "\t`⌘↩` copies the last answer and closes the panel",
+        "\t`/history` shows your last 10 questions and answers",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
         "`%`\tLog an item into To Derp's inbox",
@@ -385,14 +407,19 @@ WIKI_API = "https://en.wikipedia.org/w/api.php"
 WIKI_UA = {"User-Agent": "derpderp/1.0 (personal quick-answer overlay)"}
 
 
-def wiki_search(query, max_titles=3, char_cap=1200, timeout=15):
+def _page_url(base, title):
+    return base + urllib.parse.quote(title.replace(" ", "_"))
+
+
+def wiki_search(query, max_titles=3, char_cap=1200, timeout=15, sources=None):
     """Free, keyless web lookup via the Wikipedia API.
 
     Returns a plain-text context block of intro extracts for the top matching
     articles, or "" on no hit / failure. This sidesteps Gemini's Google Search
     grounding (which is 0-quota on the free tier for Gemini 3.x). It's good for
     factual/encyclopedic questions; it will NOT have live data such as today's
-    news, sports scores, or current prices.
+    news, sports scores, or current prices. Each article used is added to
+    `sources` as (title, url), for the links under the answer.
     """
     try:
         search_url = WIKI_API + "?" + urllib.parse.urlencode(
@@ -435,12 +462,117 @@ def wiki_search(query, max_titles=3, char_cap=1200, timeout=15):
             extract = (page.get("extract") or "").strip()
             if extract:
                 blocks.append("## %s\n%s" % (page.get("title", ""), extract[:char_cap]))
+                if sources is not None:
+                    sources.append((page.get("title", ""),
+                                    _page_url("https://en.wikipedia.org/wiki/", page.get("title", ""))))
         return "\n\n".join(blocks)
     except Exception:
         return ""
 
 
-def tavily_search(query, max_results=5, char_cap=800, timeout=20):
+WIKT_API = "https://en.wiktionary.org/w/api.php"
+# Question words that are never the word being looked up.
+WIKT_SKIP = set("""
+a an and are as at be by can could define definition describe difference do does english
+etymology explain for from gender give how i in ipa is it its it's me mean meaning means
+of on or plural pronounce pronounced pronunciation reading say says spell spelled spelling
+tell than that the this to translate translation use used verb noun adjective was what
+what's whats when where which who why with word words you your conjugate conjugation
+french spanish german italian portuguese japanese chinese mandarin cantonese korean
+vietnamese russian catalan latin greek arabic dutch thai hindi turkish polish
+""".split())   # a quoted word is looked up even when it's listed here
+# Sections that are long and rarely the answer to a quick question.
+WIKT_DROP = {"Conjugation", "Declension", "Inflection", "Derived terms", "Related terms",
+             "Descendants", "Translations", "Further reading", "References", "Anagrams",
+             "See also", "Compounds", "Collocations", "Coordinate terms", "Hyponyms",
+             "Hypernyms", "Synonyms", "Antonyms", "Alternative forms", "Mutation"}
+
+
+def _wikt_candidates(query):
+    """The words of `query` that could be the one asked about, in order: quoted
+    words first, then every word that isn't a question word or language name."""
+    quoted = re.findall(r"[\"“‘「『]([^\"”’」』]+)[\"”’」』]", query)
+    words = re.findall(r"\w[\w'’-]*", query)
+    out = []
+    for w in quoted + [w for w in words if w.lower() not in WIKT_SKIP]:
+        if w not in out:
+            out.append(w)
+    return out or words
+
+
+def _wikt_clean(extract, query, char_cap):
+    """Drop the long reference sections; when the question names a language
+    that has its own section (`== French ==`), keep only that language."""
+    sections, title, level, lines = [], "", 0, []
+    for line in extract.splitlines():
+        m = re.match(r"^(=+)\s*(.+?)\s*=+$", line.strip())
+        if m:
+            sections.append((level, title, lines))
+            level, title, lines = len(m.group(1)), m.group(2), []
+        else:
+            lines.append(line)
+    sections.append((level, title, lines))
+
+    asked = {w.lower() for w in re.findall(r"\w+", query)}
+    languages = {t for lvl, t, _ in sections if lvl == 2}
+    wanted = {t for t in languages if t.lower() in asked}
+    out, language = [], ""
+    for lvl, t, body in sections:
+        if lvl == 2:
+            language = t
+        if wanted and language not in wanted:
+            continue
+        if t in WIKT_DROP:
+            continue
+        if t:
+            out.append("%s %s" % ("#" * max(lvl - 1, 1), t))
+        out.extend(body)
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    return text[:char_cap]
+
+
+def wiktionary_search(query, max_words=2, char_cap=4000, timeout=15, sources=None):
+    """Free, keyless dictionary lookup via the English Wiktionary API (the `w`
+    flag). Finds which words of the question have an entry, then returns the
+    plain-text entry (meanings, pronunciation/IPA, etymology) for up to
+    `max_words` of them, or "" on no hit / failure. Wikipedia rarely has these
+    for an ordinary word."""
+    try:
+        candidates = _wikt_candidates(query)[:10]
+        titles = []
+        for w in candidates:
+            titles += [w] if w == w.lower() else [w, w.lower()]
+        url = WIKT_API + "?" + urllib.parse.urlencode(
+            {"action": "query", "titles": "|".join(titles[:50]), "redirects": 1, "format": "json"})
+        data = json.load(urllib.request.urlopen(
+            urllib.request.Request(url, headers=WIKI_UA), timeout=timeout))["query"]
+        found = {p["title"] for p in data.get("pages", {}).values() if "missing" not in p}
+        renamed = {r["from"]: r["to"] for r in data.get("normalized", []) + data.get("redirects", [])}
+        picked = []
+        for t in titles:
+            t = renamed.get(t, t)
+            if t in found and t not in picked:
+                picked.append(t)
+        blocks = []
+        for title in picked[:max_words]:
+            # A full (not intro-only) extract is one page per request.
+            url = WIKT_API + "?" + urllib.parse.urlencode(
+                {"action": "query", "prop": "extracts", "explaintext": 1,
+                 "titles": title, "format": "json"})
+            pages = json.load(urllib.request.urlopen(
+                urllib.request.Request(url, headers=WIKI_UA), timeout=timeout))["query"]["pages"]
+            for page in pages.values():
+                text = _wikt_clean(page.get("extract") or "", query, char_cap)
+                if text:
+                    blocks.append("## Wiktionary: %s\n%s" % (title, text))
+                    if sources is not None:
+                        sources.append((title, _page_url("https://en.wiktionary.org/wiki/", title)))
+        return "\n\n".join(blocks)
+    except Exception:
+        return ""
+
+
+def tavily_search(query, max_results=5, char_cap=800, timeout=20, sources=None):
     """Live web search via Tavily (needs TAVILY_API_KEY; 1000/mo free).
 
     Returns (context, problem): a plain-text context block (answer summary + top
@@ -479,19 +611,22 @@ def tavily_search(query, max_results=5, char_cap=800, timeout=20):
             "## %s\n%s\n<%s>"
             % (r.get("title", ""), (r.get("content") or "")[:char_cap], r.get("url", ""))
         )
+        if sources is not None and r.get("url"):
+            sources.append((r.get("title") or r["url"], r["url"]))
     return ("\n\n".join(blocks), "") if blocks else ("", "Tavily found nothing")
 
 
-def web_search(query, live=False):
+def web_search(query, live=False, sources=None):
     """Fetch context for a question. Returns (context, note): live=True prefers
     Tavily (current events) and falls back to Wikipedia, saying so in `note`;
-    live=False uses Wikipedia only."""
+    live=False uses Wikipedia only. Pages used are added to `sources`."""
     if live:
-        context, problem = tavily_search(query)
+        context, problem = tavily_search(query, sources=sources)
         if context:
             return context, ""
-        return wiki_search(query), "[live search unavailable (%s): used Wikipedia instead]" % problem
-    return wiki_search(query), ""
+        return (wiki_search(query, sources=sources),
+                "[live search unavailable (%s): used Wikipedia instead]" % problem)
+    return wiki_search(query, sources=sources), ""
 
 
 # ---------------------------------------------------------------- LLM
@@ -517,8 +652,16 @@ def llm_stream(messages, on_chunk, stats=None, engine="auto", direct=False):
     if engine == "groq" and groq_key:
         if stats is not None:
             stats["engine"] = "groq"
-        return stream_openai(GROQ_URL, groq_key, GROQ_MODEL, messages, on_chunk,
-                             stats=stats, direct=direct)
+        text, status, note = stream_openai(GROQ_URL, groq_key, GROQ_MODEL, messages, on_chunk,
+                                           stats=stats, direct=direct)
+        # Groq still rate limiting after its retry: let Gemini answer instead of a dead end.
+        if status == "failed" and note.startswith("[HTTP 429]") and GEMINI_API_KEY:
+            on_chunk("[Groq is rate limiting: asking Gemini instead]\n\n")
+            if stats is not None:
+                stats.clear()
+                stats["engine"] = "gemini"
+            return stream(messages, on_chunk, stats=stats, direct=direct)
+        return text, status, note
     if stats is not None:
         stats["engine"] = "gemini"
     return stream(messages, on_chunk, stats=stats, direct=direct)
@@ -733,6 +876,9 @@ class Controller(NSObject):
         self.press_keys = None
         self.tap_time = 0.0       # the last clean tap (0 = none pending)
         self.tap_keys = None
+        self.hidden_at = 0.0      # when the panel was last closed (0 = not since it opened)
+        self.recall = []          # lines asked since launch, for ↑ / ↓
+        self.recall_at = None     # which of them the field shows (None = a fresh line)
         self._build()
         return self
 
@@ -873,6 +1019,17 @@ class Controller(NSObject):
     # ---- show / hide
     @objc.python_method
     def show(self):
+        self.recall_at = None
+        # Reopened soon after closing, with nothing still running: the last answer
+        # (and the conversation behind it) is still there, so a stray Esc loses nothing.
+        recent = self.hidden_at and time.time() - self.hidden_at < KEEP_ANSWER_MINUTES * 60
+        self.hidden_at = 0.0
+        if recent and not self.answering and self.answer.string():
+            self._place(INPUT_H + ANSWER_H)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            self.panel.makeKeyAndOrderFront_(None)
+            self.panel.makeFirstResponder_(self.input)
+            return
         # A request still running from before Escape is abandoned: its output is
         # dropped (see _on_main) and new questions work at once.
         self.session += 1
@@ -892,6 +1049,7 @@ class Controller(NSObject):
 
     @objc.python_method
     def hide(self):
+        self.hidden_at = time.time()
         self.panel.orderOut_(None)
         NSApplication.sharedApplication().hide_(None)
 
@@ -908,11 +1066,20 @@ class Controller(NSObject):
         question = self.input.stringValue().strip()
         if not question or self.answering:
             return
+        if not self.recall or self.recall[-1] != question:
+            self.recall = (self.recall + [question])[-100:]
+        self.recall_at = None
 
         # /help — show the modifier cheatsheet in-panel; no API call.
         if question.lower() == "/help":
             self.input.setStringValue_("")
             self._show_help()
+            return
+
+        # /history — the last few saved answers; no API call.
+        if question.lower() == "/history":
+            self.input.setStringValue_("")
+            self._show_history()
             return
 
         # `% ` — hand the line to PERCENT_COMMAND; no LLM.
@@ -922,85 +1089,99 @@ class Controller(NSObject):
 
         # Parse leading modifiers. A backslash is the "command" marker:
         #   backslashes → engine + skip-Wikipedia (0 Groq+Wiki · 1 Groq · 2 Gemini)
-        #   attached flag letters (command mode only): s = Tavily search, d = direct
-        #   e.g.  \s  \\s  add Tavily   ·   \d  \\d  direct   ·   \sd  both
+        #   attached flag letters (command mode only): s = Tavily search,
+        #   w = Wiktionary, d = direct (and copied), c = copy, p = send the clipboard
+        #   e.g.  \s  \\s  add Tavily   ·   \d  \\d  direct   ·   \wc  both
         groq_ok = bool(GROQ_API_KEY)
         backslashes = 0
         while question.startswith("\\") and backslashes < 2:
             question = question[1:]
             backslashes += 1
 
-        want_tavily = False
-        direct = False
+        flags = ""
         if backslashes >= 1:
             end = 0
             while end < len(question) and not question[end].isspace():
                 end += 1
-            flags = question[:end]
-            if flags and all(c in "sd" for c in flags):
-                want_tavily = "s" in flags
-                direct = "d" in flags
+            if question[:end] and all(c in "sdwcp" for c in question[:end]):
+                flags = question[:end]
                 question = question[end:]
         question = question.strip()
         if not question:
             return
+        direct = "d" in flags
+        copy_when_done = direct or "c" in flags
 
         engine = "gemini" if backslashes == 2 else "auto"
-        if backslashes == 0:
-            search = "wiki"
-        elif want_tavily:
-            search = "web"
-        else:
-            search = None
-
-        if search == "wiki":
-            indicator = "\ud83d\udd0e Searching Wikipedia\u2026"
-        elif search == "web":
-            indicator = "\ud83d\udd0e Searching Tavily\u2026"
+        searches = ["wiki"] if backslashes == 0 else [
+            s for f, s in (("w", "wikt"), ("s", "web")) if f in flags]
+        names = {"wiki": "Wikipedia", "wikt": "Wiktionary", "web": "Tavily"}
+        if searches:
+            indicator = "🔎 Searching %s…" % " + ".join(names[s] for s in searches)
         elif engine == "gemini" or not groq_ok:
-            indicator = "\ud83d\udd0e Asking Gemini\u2026"
+            indicator = "🔎 Asking Gemini…"
         else:
-            indicator = "\ud83d\udd0e Asking Groq\u2026"
+            indicator = "🔎 Asking Groq…"
+
+        # `p`: the clipboard rides along with the question (searches use the question alone).
+        ask_text, echo = question, question
+        if "p" in flags:
+            clip = (NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString) or "").strip()
+            if clip:
+                ask_text = "%s\n\nClipboard:\n%s" % (question, clip[:3000])
+                echo = "%s  (+ clipboard)" % question
+            else:
+                echo = "%s  (clipboard has no text)" % question
 
         self._begin()
         session = self.session
-        user_msg = {"role": "user", "parts": [{"text": question}]}
+        user_msg = {"role": "user", "parts": [{"text": ask_text}]}
         self.messages.append(user_msg)
 
         prefix = "\n\n" if self.answer.string() else ""
-        self.appendText_("%s\u203a %s\n\n" % (prefix, question))
+        self.appendText_("%s› %s\n\n" % (prefix, echo))
         self._grow()
 
         def chunk(text):
             self._on_main(session, self.appendText_, text)
 
         def worker():
-            text, status, note, footer = "", "failed", "", ""
+            text, status, note, footer, sources = "", "failed", "", "", []
             try:
                 # Build the request history; when searching, augment only the copy
                 # sent to the model so the stored history stays the clean question.
                 api_messages = [dict(m) for m in self.messages if m is not user_msg] + [user_msg]
                 chunk(indicator + "\n\n")
-                if search in ("wiki", "web"):
-                    context, search_note = web_search(question, live=(search == "web"))
-                    if search_note:
-                        chunk(search_note + "\n\n")
+                if searches:
+                    contexts = []
+                    if "wikt" in searches:
+                        contexts.append(wiktionary_search(question, sources=sources))
+                        if not contexts[-1]:
+                            chunk("[no Wiktionary entry found]\n\n")
+                    if "wiki" in searches or "web" in searches:
+                        context, search_note = web_search(question, live=("web" in searches),
+                                                          sources=sources)
+                        contexts.append(context)
+                        if search_note:
+                            chunk(search_note + "\n\n")
+                    context = "\n\n".join(c for c in contexts if c)
                     if context:
                         augmented = (
                             "Web results:\n%s\n\n"
-                            "Using the results above, answer: %s" % (context, question)
+                            "Using the results above, answer: %s" % (context, ask_text)
                         )
                         api_messages[-1] = {"role": "user", "parts": [{"text": augmented}]}
                     else:
-                        chunk("[no web results \u2014 answering from general knowledge]\n\n")
+                        chunk("[no web results — answering from general knowledge]\n\n")
                 stats = {}
                 text, status, note = llm_stream(api_messages, chunk, stats=stats,
                                                 engine=engine, direct=direct)
-                footer = self._quota_footer(stats, search)
+                footer = self._quota_footer(stats, "web" if "web" in searches else None)
             except Exception as e:   # whatever happens, the panel is released below
                 note = _redact("[error] %s" % e)
             finally:
-                self._on_main(session, self._finish_answer, user_msg, text, status, note, footer)
+                self._on_main(session, self._finish_answer, user_msg, text, status, note, footer,
+                              question, sources, copy_when_done)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1022,12 +1203,20 @@ class Controller(NSObject):
         AppHelper.callAfter(run)
 
     @objc.python_method
-    def _finish_answer(self, user_msg, text, status, note, footer):
+    def _finish_answer(self, user_msg, text, status, note, footer,
+                       question="", sources=(), copy_when_done=False):
         """Everything that ends a question, in one main-thread step (A4)."""
         if status == "ok" and text.strip():
             self.messages.append({"role": "model", "parts": [{"text": text}]})
             self.last_answer = text.strip()
             self.copybtn.setHidden_(False)
+            self._save_history(question, self.last_answer)
+            if copy_when_done:
+                self._copy_to_clipboard(self.last_answer)
+                self.copybtn.setTitle_("✓")
+                self.performSelector_withObject_afterDelay_("resetCopyTitle:", None, 1.0)
+                footer = (footer + "   ·   copied") if footer else "\n\n— copied"
+            self._append_sources(sources)
         else:
             # Not a complete answer (A7): shown, but neither kept for follow-ups nor copyable.
             if self.messages and self.messages[-1] is user_msg:
@@ -1036,6 +1225,62 @@ class Controller(NSObject):
                 self.appendText_(("\n\n" if text else "") + note)
         self.appendFooter_(footer)
         self.answering = False
+
+    @objc.python_method
+    def _save_history(self, question, answer):
+        """Append the finished answer to HISTORY_FILE (blank = no history)."""
+        if not HISTORY_FILE or not question:
+            return
+        try:
+            os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+            with open(HISTORY_FILE, "a") as f:
+                f.write("Q: %s\nA: %s\n\n" % (question, answer))
+        except OSError:
+            pass   # history is a convenience: never let it break an answer
+
+    @objc.python_method
+    def _show_history(self, count=10):
+        """Show the last `count` saved answers. No API call."""
+        try:
+            with open(HISTORY_FILE) as f:
+                f.seek(max(0, os.path.getsize(HISTORY_FILE) - 20000))   # the tail is enough
+                tail = f.read()
+        except (OSError, TypeError, ValueError):
+            tail = ""
+        entries = re.split(r"(?m)^(?=Q: )", tail)[1:][-count:]
+        self.last_answer = ""
+        self.copybtn.setHidden_(True)
+        self.answer.setString_("")
+        self._grow()
+        if entries:
+            self.appendText_("\n".join(e.strip() + "\n" for e in entries))
+        else:
+            self.appendText_("No history yet." if HISTORY_FILE else
+                             "History is off: set HISTORY_FILE in CONFIG.")
+
+    @objc.python_method
+    def _append_sources(self, sources, limit=5):
+        """A dim line of clickable links to the pages the answer was built from."""
+        seen, links = set(), []
+        for title, url in sources:
+            if url and url not in seen:
+                seen.add(url)
+                links.append((title if len(title) <= 40 else title[:39] + "…", url))
+        if not links:
+            return
+        small = NSFont.systemFontOfSize_(12)
+        grey = NSColor.secondaryLabelColor()
+        line = NSMutableAttributedString.alloc().init()
+        def add(text, attrs):
+            line.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
+        add("\n\nSources: ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
+        for n, (title, url) in enumerate(links[:limit]):
+            if n:
+                add("  ·  ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
+            add(title, {NSFontAttributeName: small, NSLinkAttributeName: NSURL.URLWithString_(url)})
+        storage = self.answer.textStorage()
+        storage.appendAttributedString_(line)
+        self.answer.scrollRangeToVisible_((storage.length(), 0))
 
     @objc.python_method
     def _run_percent(self, line):
@@ -1173,6 +1418,16 @@ class Controller(NSObject):
         if event.keyCode() == ESCAPE_KEYCODE:
             self.hide()
             return None
+        # ⌘↩ copies the last answer and closes (an unasked line in the field still submits).
+        if (
+            event.keyCode() in RETURN_KEYCODES
+            and (event.modifierFlags() & NSEventModifierFlagCommand)
+            and self.last_answer
+            and not self.input.stringValue().strip()
+        ):
+            self._copy_to_clipboard(self.last_answer)
+            self.hide()
+            return None
         # ⌘C with nothing selected copies the whole last answer.
         if (
             self.panel.isVisible()
@@ -1202,6 +1457,20 @@ class Controller(NSObject):
             return True
         if sel == "insertNewline:":
             self.submit()
+            return True
+        if sel in ("moveUp:", "moveDown:") and self.recall:
+            # ↑ / ↓ step through the lines asked since launch; past the newest, a blank field.
+            at = len(self.recall) if self.recall_at is None else self.recall_at
+            at = max(0, at - 1) if sel == "moveUp:" else at + 1
+            if at >= len(self.recall):
+                self.recall_at = None
+                self.input.setStringValue_("")
+            else:
+                self.recall_at = at
+                self.input.setStringValue_(self.recall[at])
+            editor = self.input.currentEditor()
+            if editor is not None:
+                editor.setSelectedRange_((len(self.input.stringValue()), 0))
             return True
         return False
 

@@ -51,11 +51,12 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 
 | Region | What's there |
 |---|---|
-| **CONFIG block** | `GROQ_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY` (blank in the public copy); `GROQ_MODEL`, `GEMINI_MODEL`; `GEMINI_DAILY_LIMIT`, `TAVILY_MONTHLY_LIMIT` (display-only); `RIGHT_CMD_KEYCODE` (54 = Right ⌘), `DOUBLE_TAP_TIMEOUT`; `USAGE_FILE`, `LOCK_FILE`. Then derived `GROQ_URL`, `GEMINI_URL`. |
-| **Prompts** | `SYSTEM` (the base instruction), `DIRECT_INSTRUCTION` (appended for `\d`/raw mode), `_system_prompt(direct)` (returns SYSTEM + the current local date/time so temporal questions work, + DIRECT_INSTRUCTION when direct), `HELP_TEXT` (the `/help` cheatsheet). |
-| **Usage tally** | `_today_key()`, `_month_key()`, `_load_usage()`, `bump_usage(name, period)`, `usage_count(name, period)`. Writes a small JSON at `USAGE_FILE`. Used only for the estimated Gemini/Tavily quota readout. |
-| **Search layer** | `wiki_search(query)` (MediaWiki API over `urllib`: `list=search` top 3 titles → `prop=extracts` intros). `tavily_search(query)` (POST `api.tavily.com/search`; bumps the Tavily tally). `web_search(query, live=False)` → Tavily when `live` and a key exists, else Wikipedia. |
-| **LLM layer** | `llm_stream(messages, on_chunk, on_done, stats, engine, direct)` picks the engine and delegates. `stream_openai(...)` handles Groq (OpenAI-compatible SSE). `stream(...)` handles Gemini (`streamGenerateContent` SSE). |
+| **CONFIG block** | `GROQ_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY` (blank in the public copy); `GROQ_MODEL`, `GEMINI_MODEL`; `GEMINI_DAILY_LIMIT`, `TAVILY_MONTHLY_LIMIT` (display-only); `RIGHT_CMD_KEYCODE` (54 = Right ⌘), `DOUBLE_TAP_TIMEOUT`; `USAGE_FILE`, `LOCK_FILE`, `HISTORY_FILE`; `KEEP_ANSWER_MINUTES`; `PERCENT_COMMAND` (blank = `%` lines off). |
+| **Keys and settings from outside the file** | Right after CONFIG, `load_secret(name)` reads the environment, then `export NAME="..."` lines in `~/.secrets`. `GROQ_POPUPSEARCH`, `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH` and `DERPDERP_PERCENT_COMMAND` found there win over the CONFIG values. Then derived `GROQ_URL`, `GEMINI_URL`. |
+| **Prompts** | `SYSTEM` (the base instruction), `DIRECT_INSTRUCTION` (appended for `\d`/raw mode), `_system_prompt(direct)` (returns SYSTEM + the current local date/time so temporal questions work, + DIRECT_INSTRUCTION when direct), `HELP` (the `/help` cheatsheet as data: sections of lines, `backticks` drawn grey) and `help_attributed()` (lays it out). |
+| **Usage tally** | `_gemini_day_key()` (Pacific midnight, Gemini's reset), `_month_key()`, `_load_usage()`, `bump_usage(name, period)`, `usage_count(name, period)`. Writes a small JSON at `USAGE_FILE`. Used only for the estimated Gemini/Tavily quota readout. |
+| **Search layer** | `wiki_search(query)` (MediaWiki API over `urllib`: `list=search` top 3 titles → `prop=extracts` intros). `wiktionary_search(query)` (the `w` flag: `_wikt_candidates` picks the word(s) asked about, skipping question words and language names; `_wikt_clean` drops long reference sections and keeps only a language the question names). `tavily_search(query)` (POST `api.tavily.com/search`; bumps the Tavily tally). `web_search(query, live=False)` → Tavily when `live` and a key exists, else Wikipedia. Each takes `sources=[]` and appends the `(title, url)` of every page used, for the link line under the answer. |
+| **LLM layer** | `llm_stream(messages, on_chunk, stats, engine, direct)` picks the engine and delegates. `stream_openai(...)` handles Groq (OpenAI-compatible SSE). `stream(...)` handles Gemini (`streamGenerateContent` SSE). |
 | **UI** | `Panel(NSPanel)` (a borderless non-activating panel; `cancelOperation_` = Escape→hide). `Controller(NSObject)` builds and drives everything. |
 | **Entrypoint** | `main()` → single-instance lock, accessory activation policy, and the global/local event monitors. |
 
@@ -65,15 +66,25 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
   `NSButton` (`⧉` copy button).
 - `_place()` / `_grow()` — geometry (panel centered near top of screen; grows when an
   answer arrives).
-- `show()` / `hide()` / `toggle()` — visibility. **`show()` resets `self.messages = []`**
-  (see "Conversation memory").
-- `submit()` — reads the input, **parses modifiers**, echoes the question, spawns a
-  **worker thread**.
-- `worker()` (inside `submit`) — runs the search, builds `api_messages`, calls
-  `llm_stream`, then appends the quota footer.
-- `appendText_()` / `appendFooter_()` / `showCopyButton_()` — UI mutations; called on the
-  main thread (see "Threading").
-- `copyAnswer_()` / `local_keydown()` — the copy feature (⧉ button and ⌘C).
+- `show()` / `hide()` / `toggle()` — visibility. `hide()` records the time; `show()`
+  within `KEEP_ANSWER_MINUTES` of it (and with no request still running) brings back the
+  last answer and conversation, otherwise **it resets `self.messages = []`** (see
+  "Conversation memory").
+- `submit()` — reads the input, handles `/help`, `/history` and `% ` lines, **parses
+  modifiers**, echoes the question, spawns a **worker thread**.
+- `worker()` (inside `submit`) — runs the search(es), builds `api_messages`, calls
+  `llm_stream`, then hands everything to `_finish_answer()`.
+- `_finish_answer()` — keeps a complete answer for follow-ups, appends it to
+  `HISTORY_FILE` (`_save_history`), copies it when the line had `c` or `d`, adds the
+  source links (`_append_sources`) and the quota footer.
+- `_run_percent()` — a `% ` line runs `PERCENT_COMMAND` with the rest of the line as its
+  last argument and shows what it printed; no LLM.
+- `appendText_()` / `appendFooter_()` — UI mutations; called on the main thread (see
+  "Threading").
+- `copyAnswer_()` / `local_keydown()` — the copy feature (⧉ button, ⌘C, ⌘↩ = copy and
+  close), Esc, and ⌘A/⌘C/⌘V/⌘X routing.
+- `control_textView_doCommandBySelector_()` — Return submits, Esc hides, ↑/↓ step through
+  `self.recall` (the lines asked since launch).
 - `_quota_footer()` — builds the dim italic quota line under each answer.
 - `check_double_tap()` / `global_flags()` / `local_flags()` — hotkey detection.
 
@@ -81,18 +92,22 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 
 - **Modifier parsing (in `Controller.submit()`):** a leading `\` marks a command.
   0 backslashes → Groq + Wikipedia (default); 1 `\` → Groq, no search; 2 `\\` → Gemini,
-  no search. After the backslash(es), the flag letters **`s`** (add Tavily) and **`d`**
-  (direct/raw output) may appear in any order (`\sd`, `\ds`, `\\sd`, …). The flag cluster
-  is only read if every character before the first space is `s`/`d`; otherwise it's
-  treated as part of the question (so `\define x` is a question, not a flag). A bare
+  no search. After the backslash(es), flag letters may appear in any order (`\sd`,
+  `\wc`, `\\sp`, …): **`s`** (add Tavily), **`w`** (add Wiktionary), **`d`** (direct/raw
+  output, also copied), **`c`** (copy the answer when done), **`p`** (send the clipboard
+  along with the question; searches still use the question alone). The flag cluster is
+  only read if every character before the first space is one of `s d w c p`; otherwise
+  it's treated as part of the question (so `\define x` is a question, not a flag). A bare
   leading `?` or any non-flag char is part of the question.
-- **Engine selection is by key presence, not failover:** `llm_stream` uses Groq when
-  `GROQ_API_KEY` is set (or `engine="auto"`), Gemini when forced by `\\` or when there's
-  no Groq key. **There is no automatic "Groq rate-limited → Gemini" failover.** On a 429,
-  `stream_openai` retries once then reports the error.
+- **Engine selection:** `llm_stream` uses Groq when `GROQ_API_KEY` is set
+  (`engine="auto"`), Gemini when forced by `\\` or when there's no Groq key. If Groq is
+  still returning 429 after `stream_openai`'s one retry and a Gemini key exists, it says
+  so in the panel and asks Gemini instead; without a Gemini key the 429 is reported.
 - **Conversation memory:** `submit()` appends each turn to `self.messages` and the worker
   sends the **whole history** to the LLM, so follow-ups within an open session have
-  context. `show()` clears it, so each fresh open starts blank. When searching, only the
+  context. `show()` clears it unless the panel is reopened within `KEEP_ANSWER_MINUTES`.
+  Separately, every complete answer is appended to `HISTORY_FILE` as `Q: …` / `A: …`
+  lines (blank = off), and `/history` shows the last 10. When searching, only the
   copy sent to the model (`api_messages`) is augmented with search results; the stored
   history keeps the clean question.
 - **Threading:** all network I/O runs on a daemon **worker thread**. AppKit is not
@@ -113,9 +128,16 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
   access `GROQ_MODEL`/`GEMINI_MODEL`; the fix is to change that constant, not the code.
 - **Single-instance lock:** `main()` holds an `fcntl.flock` on `LOCK_FILE`; a second
   instance exits cleanly. Relevant if the user runs it manually *and* via the LaunchAgent.
-- **Keys:** the public copy has blank inline keys in CONFIG. Some users instead point
-  those lines at a hidden dotfile (e.g. reading `~/.secrets`) so keys never live in the
-  script — a reasonable change to help with if asked.
+- **Keys:** the public copy has blank inline keys in CONFIG, and pasting a key there
+  works. To keep keys out of the script instead (safer if the user ever shares or commits
+  it), no code change is needed: put `export GROQ_POPUPSEARCH="gsk_..."` (and
+  `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH`) in `~/.secrets` or the environment;
+  `load_secret` reads those first.
+- **`%` lines:** a line starting `% ` never reaches an LLM. It runs `PERCENT_COMMAND`
+  (blank = off, and the panel says so) with the rest of the line as the last argument,
+  for hooking DerpDerp to the user's own note or to-do tool. `DERPDERP_PERCENT_COMMAND`
+  in the environment or `~/.secrets` wins over CONFIG. The `/help` "ESTATE" section
+  describes the author's own to-do tool's syntax; it means nothing without that tool.
 - **Auto-start:** if the user set up the optional macOS **LaunchAgent**, edits to
   `derpderp.py` don't take effect until they reload it:
   `launchctl kickstart -k gui/$(id -u)/com.derpderp.agent`. Remind them after any code
@@ -130,7 +152,10 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 | Change answer tone/length | `SYSTEM`; for `\d` raw mode, `DIRECT_INSTRUCTION` |
 | Add or change a modifier | the parser in `Controller.submit()` |
 | Resize / restyle the panel | `PANEL_W`/`INPUT_H`/`FIELD_H`/`ANSWER_H`/`SIDE` + `_build()` (blur material, corner radius, fonts, colors) |
-| Swap or add a search source | `wiki_search` / `tavily_search` / `web_search` |
+| Swap or add a search source | `wiki_search` / `wiktionary_search` / `tavily_search` / `web_search`, and the `searches` list in `submit()` |
+| Wiktionary picks the wrong word | `WIKT_SKIP` (words never looked up); quoting the word in the question always works |
+| Move or turn off the answer history | `HISTORY_FILE` (blank = off) |
+| Keep the last answer longer / never | `KEEP_ANSWER_MINUTES` (0 = every open starts fresh) |
 | Swap or add an LLM provider | `llm_stream` + `stream_openai` (it's OpenAI-compatible, so OpenRouter/others drop in with a new URL/model/key) |
 | Fix the quota estimates | `GEMINI_DAILY_LIMIT`, `TAVILY_MONTHLY_LIMIT` (display only) |
 
