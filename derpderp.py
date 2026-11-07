@@ -69,13 +69,18 @@ from AppKit import (
     NSTextField,
     NSTextView,
     NSVisualEffectView,
+    NSFontWeightSemibold,
+    NSMutableParagraphStyle,
+    NSParagraphStyle,
+    NSParagraphStyleAttributeName,
+    NSTextTab,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
     NSWindowCollectionBehaviorTransient,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSObject, NSAttributedString
+from Foundation import NSObject, NSAttributedString, NSMutableAttributedString
 
 # ============================================================================
 #  CONFIG  ───  EDIT THIS SECTION
@@ -210,23 +215,69 @@ DIRECT_INSTRUCTION = (
 )
 
 # Shown in-panel when the user submits "/help". Purely local — no API call.
-HELP_TEXT = (
-    "SEARCH ENGINES\n"
-    "␣    Groq response; yes wikipedia, no search\n"
-    "\\    Groq response; no wikipedia, no search\n"
-    "\\\\   Gemini response; no wikipedia, no search\n"
-    "\n"
-    "\n"
-    "MODIFIERS  (directly to \\ or \\\\)\n"
-    "s  Add web search via Tavily\n"
-    "d  Direct plaintext answer, should be pastable\n"
-    "\n"
-    "\n"
-    "ESTATE  (if you're using my other task management tools)\n"
-    "%  Log an item into To Derp's inbox\n"
-    "   End task with @weekday (i.e., @monday) → be reminded next Monday\n"
-    "   #{Area}/{Project}/{Task}/{Subtask} → Log directly to a registered To Derp item\n"
+# Each section: (header, note beside it, lines). In a line, `backticks` mark a
+# modifier or command (drawn grey) and a tab starts the explanation, so every
+# explanation begins at HELP_COLUMN.
+HELP = (
+    ("SEARCH ENGINES", "", (
+        "`␣`\tGroq response; yes wikipedia, no search",
+        "`\\`\tGroq response; no wikipedia, no search",
+        "`\\\\`\tGemini response; no wikipedia, no search",
+    )),
+    ("MODIFIERS", "(directly to `\\` or `\\\\`)", (
+        "`s`\tAdd web search via Tavily",
+        "`d`\tDirect plaintext answer, should be pastable",
+    )),
+    ("ESTATE", "(if you're using my other task management tools)", (
+        "`%`\tLog an item into To Derp's inbox",
+        "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
+        "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
+    )),
 )
+HELP_COLUMN = 30   # points from the text's left edge to where explanations start
+
+
+def body_attributes():
+    """The plain answer style: what every typed or streamed line uses."""
+    return {
+        NSFontAttributeName: NSFont.systemFontOfSize_(14),
+        NSForegroundColorAttributeName: NSColor.labelColor(),
+        NSParagraphStyleAttributeName: NSParagraphStyle.defaultParagraphStyle(),
+    }
+
+
+def help_attributed():
+    """HELP as styled text: bigger headers, grey modifiers, aligned explanations."""
+    body = NSFont.systemFontOfSize_(14)
+    head = NSFont.systemFontOfSize_weight_(17, NSFontWeightSemibold)
+    rows = NSMutableParagraphStyle.alloc().init()
+    rows.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(0, HELP_COLUMN, {})])
+    rows.setHeadIndent_(HELP_COLUMN)   # a wrapped explanation stays in its column
+    out = NSMutableAttributedString.alloc().init()
+
+    def add(text, font, para, grey=False):
+        color = NSColor.secondaryLabelColor() if grey else NSColor.labelColor()
+        out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+            text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color,
+                   NSParagraphStyleAttributeName: para}))
+
+    def add_marked(text, font, para):
+        for i, part in enumerate(text.split("`")):
+            if part:
+                add(part, font, para, grey=bool(i % 2))
+
+    for n, (title, note, lines) in enumerate(HELP):
+        header = NSMutableParagraphStyle.alloc().init()
+        header.setParagraphSpacingBefore_(18 if n else 0)
+        header.setParagraphSpacing_(4)
+        add(title, head, header)
+        if note:
+            add_marked("  " + note, body, header)
+        add("\n", body, header)
+        for line in lines:
+            add_marked(line + "\n", body, rows)
+    return out
+
 
 
 def _system_prompt(direct=False):
@@ -622,7 +673,7 @@ class Controller(NSObject):
         self.input.setBezeled_(False)
         self.input.setDrawsBackground_(False)
         self.input.setFocusRingType_(1)
-        legend = "␣ Wikipedia    \\ Groq    \\\\ Gemini  |  Or, /help"
+        legend = "␣ Wikipedia・\\ Groq・\\\\ Gemini・Or, /help"
         self.input.setPlaceholderAttributedString_(
             NSAttributedString.alloc().initWithString_attributes_(
                 legend,
@@ -917,13 +968,14 @@ class Controller(NSObject):
         self.copybtn.setHidden_(True)
         self.answer.setString_("")
         self._grow()
-        self.appendText_(HELP_TEXT)
+        self.answer.textStorage().setAttributedString_(help_attributed())
         self.answer.scrollRangeToVisible_((0, 0))
 
     def appendText_(self, text):
         storage = self.answer.textStorage()
         self.answer.setEditable_(True)
         self.answer.setSelectedRange_((storage.length(), 0))
+        self.answer.setTypingAttributes_(body_attributes())  # not the help's or footer's style
         self.answer.insertText_(text)
         self.answer.setEditable_(False)
         self.answer.scrollRangeToVisible_((storage.length(), 0))
