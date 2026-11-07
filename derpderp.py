@@ -113,6 +113,48 @@ LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
 #  END OF CONFIG  ───  you shouldn't need to edit below here
 # ============================================================================
 
+# --- Keys kept outside this file (optional) ---------------------------------
+# If GROQ_POPUPSEARCH / TAVILY_POPUPSEARCH / GEMINI_POPUPSEARCH is set in your
+# environment, or as an `export NAME="..."` line in ~/.secrets, that value wins
+# over the one pasted in CONFIG. Otherwise the CONFIG value is used.
+
+SECRETS_FILE = os.path.expanduser("~/.secrets")
+_secrets_cache = None
+
+
+def load_secret(name):
+    """Return a secret by name from the environment, or by parsing ~/.secrets.
+
+    ~/.secrets is a shell file of `export KEY=value` lines (often sourced by
+    ~/.zshrc). Parsing the file too means the key is still found when the app
+    is launched outside that shell, e.g. by a LaunchAgent.
+    """
+    value = os.environ.get(name)
+    if value:
+        return value.strip()
+
+    global _secrets_cache
+    if _secrets_cache is None:
+        _secrets_cache = {}
+        try:
+            with open(SECRETS_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export "):
+                        line = line[len("export "):]
+                    if line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    _secrets_cache[key.strip()] = val.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return _secrets_cache.get(name)
+
+
+GROQ_API_KEY   = load_secret("GROQ_POPUPSEARCH")   or GROQ_API_KEY
+TAVILY_API_KEY = load_secret("TAVILY_POPUPSEARCH") or TAVILY_API_KEY
+GEMINI_API_KEY = load_secret("GEMINI_POPUPSEARCH") or GEMINI_API_KEY
+
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
 # ============================================================================
