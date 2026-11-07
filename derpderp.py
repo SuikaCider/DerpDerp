@@ -11,6 +11,7 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \\        Gemini answer, no search
     \s \\s    add a live web search via Tavily
     \d \\d    direct: a bare, paste-ready plaintext answer
+    %         hand the line to your own command (optional: PERCENT_COMMAND in CONFIG)
 
 ──────────────────────────────────────────────────────────────────────────
 SETUP (3 steps)
@@ -33,6 +34,8 @@ SETUP (3 steps)
 import os
 import fcntl
 import json
+import shlex
+import subprocess
 import time
 import threading
 import urllib.error
@@ -109,6 +112,14 @@ DOUBLE_TAP_TIMEOUT = 0.4       # max seconds between the two taps
 USAGE_FILE = os.path.expanduser("~/.cache/derpderp_usage.json")
 LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
 
+# --- `% ` lines (optional; blank = off) --------------------------------------
+# A line typed as `% buy milk` runs this command with "buy milk" added as its
+# last argument, and shows the command's printed output in the panel: a hook
+# for your own note-taking or to-do tool. Example:
+#   PERCENT_COMMAND = "python3 /path/to/add_note.py"
+# A DERPDERP_PERCENT_COMMAND environment variable (or ~/.secrets line) wins.
+PERCENT_COMMAND = ""
+
 # ============================================================================
 #  END OF CONFIG  ───  you shouldn't need to edit below here
 # ============================================================================
@@ -154,6 +165,7 @@ def load_secret(name):
 GROQ_API_KEY   = load_secret("GROQ_POPUPSEARCH")   or GROQ_API_KEY
 TAVILY_API_KEY = load_secret("TAVILY_POPUPSEARCH") or TAVILY_API_KEY
 GEMINI_API_KEY = load_secret("GEMINI_POPUPSEARCH") or GEMINI_API_KEY
+PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
 
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
@@ -168,6 +180,9 @@ GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "%s:streamGenerateContent?alt=sse&key=%s" % (GEMINI_MODEL, GEMINI_API_KEY)
 )
+
+ESCAPE_KEYCODE = 53
+EDIT_SHORTCUTS = {"a": "selectAll:", "c": "copy:", "v": "paste:", "x": "cut:"}
 
 PANEL_W = 620
 INPUT_H = 54        # height of the question bar
@@ -197,14 +212,20 @@ DIRECT_INSTRUCTION = (
 # Shown in-panel when the user submits "/help". Purely local — no API call.
 HELP_TEXT = (
     "SEARCH ENGINES\n"
-    "␣    Groq response w/ Wikipedia context\n"
-    "\\    Groq response, no context or web search\n"
-    "\\\\   Gemini response, no context or web search\n"
+    "␣    Groq response; yes wikipedia, no search\n"
+    "\\    Groq response; no wikipedia, no search\n"
+    "\\\\   Gemini response; no wikipedia, no search\n"
     "\n"
     "\n"
     "MODIFIERS  (directly to \\ or \\\\)\n"
-    "s  add web search via Tavily\n"
-    "d  direct plaintext answer, should be pastable\n"
+    "s  Add web search via Tavily\n"
+    "d  Direct plaintext answer, should be pastable\n"
+    "\n"
+    "\n"
+    "ESTATE  (if you're using my other task management tools)\n"
+    "%  Log an item into To Derp's inbox\n"
+    "   End task with @weekday (i.e., @monday) → be reminded next Monday\n"
+    "   #{Area}/{Project}/{Task}/{Subtask} → Log directly to a registered To Derp item\n"
 )
 
 
@@ -601,7 +622,7 @@ class Controller(NSObject):
         self.input.setBezeled_(False)
         self.input.setDrawsBackground_(False)
         self.input.setFocusRingType_(1)
-        legend = "␣ Check Wikipedia    \\ Ask Groq    \\\\ Ask Gemini  …  /help for more"
+        legend = "␣ Wikipedia    \\ Groq    \\\\ Gemini  |  Or, /help"
         self.input.setPlaceholderAttributedString_(
             NSAttributedString.alloc().initWithString_attributes_(
                 legend,
@@ -733,6 +754,11 @@ class Controller(NSObject):
             self._show_help()
             return
 
+        # `% ` — hand the line to PERCENT_COMMAND; no LLM.
+        if question.startswith("% "):
+            self._run_percent(question[2:].strip())
+            return
+
         # Parse leading modifiers. A backslash is the "command" marker:
         #   backslashes → engine + skip-Wikipedia (0 Groq+Wiki · 1 Groq · 2 Gemini)
         #   attached flag letters (command mode only): s = Tavily search, d = direct
@@ -818,6 +844,36 @@ class Controller(NSObject):
             llm_stream(api_messages, chunk, done, stats=stats, engine=engine, direct=direct)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "appendFooter:", self._quota_footer(stats, search), False
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @objc.python_method
+    def _run_percent(self, line):
+        """Run PERCENT_COMMAND with `line` as its last argument and show what it printed."""
+        if not line:
+            return
+        self.answering = True
+        self.input.setStringValue_("")
+        prefix = "\n\n" if self.answer.string() else ""
+        self.appendText_("%s\u203a %% %s\n\n" % (prefix, line))
+        self._grow()
+
+        def worker():
+            try:
+                if not PERCENT_COMMAND:
+                    out = "% lines are off: set PERCENT_COMMAND in CONFIG."
+                else:
+                    r = subprocess.run(shlex.split(PERCENT_COMMAND) + [line],
+                                       capture_output=True, text=True, timeout=20)
+                    out = (r.stdout if r.returncode == 0 else r.stderr or r.stdout).strip()
+                    out = out or ("done" if r.returncode == 0 else "failed (exit %d)" % r.returncode)
+            except Exception as e:  # a bad command must never leave the panel stuck
+                out = "%% command failed: %s" % e
+            finally:
+                self.answering = False
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "appendText:", out + "\n", False
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -921,6 +977,12 @@ class Controller(NSObject):
 
     @objc.python_method
     def local_keydown(self, event):
+        if not (self.panel.isVisible() and self.panel.isKeyWindow()):
+            return event
+        # Escape closes the panel from anywhere in it (the field, or the answer after a click).
+        if event.keyCode() == ESCAPE_KEYCODE:
+            self.hide()
+            return None
         # ⌘C with nothing selected copies the whole last answer.
         if (
             self.panel.isVisible()
@@ -933,6 +995,12 @@ class Controller(NSObject):
             self.copybtn.setTitle_("✓")
             self.performSelector_withObject_afterDelay_("resetCopyTitle:", None, 1.0)
             return None  # consume the event
+        # ⌘A / ⌘C / ⌘V / ⌘X: a menu-less background app gets no Edit menu to route these,
+        # so send them to whatever has focus (the question field or the answer text).
+        if event.modifierFlags() & NSEventModifierFlagCommand:
+            action = EDIT_SHORTCUTS.get(event.charactersIgnoringModifiers())
+            if action and NSApplication.sharedApplication().sendAction_to_from_(action, None, self):
+                return None
         return event
 
     # ---- text field delegate (handles Return & Escape directly)
