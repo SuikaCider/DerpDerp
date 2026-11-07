@@ -14,5 +14,5 @@ venv/
 
 # Local runtime state (normally lives in ~/.cache, ignored here just in case)
 *.log
-quickask_usage.json
-quickask.lock
+derpderp_usage.json
+derpderp.lock
