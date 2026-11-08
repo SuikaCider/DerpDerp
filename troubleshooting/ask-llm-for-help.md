@@ -51,8 +51,8 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 
 | Region | What's there |
 |---|---|
-| **CONFIG block** | `GROQ_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY` (blank in the public copy); `GROQ_MODEL`, `GEMINI_MODEL`; `GEMINI_DAILY_LIMIT`, `TAVILY_MONTHLY_LIMIT` (display-only); `RIGHT_CMD_KEYCODE` (54 = Right ⌘), `DOUBLE_TAP_TIMEOUT`; `USAGE_FILE`, `LOCK_FILE`, `HISTORY_FILE`; `KEEP_ANSWER_MINUTES`; `PERCENT_COMMAND` (blank = `%` lines off). |
-| **Keys and settings from outside the file** | Right after CONFIG, `load_secret(name)` reads the environment, then `export NAME="..."` lines in `~/.secrets`. `GROQ_POPUPSEARCH`, `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH` and `DERPDERP_PERCENT_COMMAND` found there win over the CONFIG values. Then derived `GROQ_URL`, `GEMINI_URL`. |
+| **SETTINGS block** | The built-in defaults, then `load_config()`: values in `derpderp_config.py` (next to the script; the user copies it from `derpderp_config.example.py`, which comments every setting; git ignores it) replace them. Names listed in `SETTING_NAMES`: `GROQ_API_KEY`, `TAVILY_API_KEY`, `GEMINI_API_KEY` (blank by default); `GROQ_MODEL`, `GEMINI_MODEL`; `GEMINI_DAILY_LIMIT`, `TAVILY_MONTHLY_LIMIT` (display-only); `RIGHT_CMD_KEYCODE` (54 = Right ⌘), `DOUBLE_TAP_TIMEOUT`; `USAGE_FILE`, `LOCK_FILE`, `HISTORY_FILE`; `KEEP_ANSWER_MINUTES`; `PERCENT_COMMAND` (blank = `%` lines off). |
+| **Keys and settings from outside the file** | Right after SETTINGS, `load_secret(name)` reads the environment, then `export NAME="..."` lines in `~/.secrets`. `GROQ_POPUPSEARCH`, `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH` and `DERPDERP_PERCENT_COMMAND` found there win over `derpderp_config.py`. Then derived `GROQ_URL`, `GEMINI_URL`. |
 | **Prompts** | `SYSTEM` (the base instruction), `DIRECT_INSTRUCTION` (appended for `\d`/raw mode), `_system_prompt(direct)` (returns SYSTEM + the current local date/time so temporal questions work, + DIRECT_INSTRUCTION when direct), `HELP` (the `/help` cheatsheet as data: sections of lines, `backticks` drawn grey) and `help_attributed()` (lays it out). |
 | **Usage tally** | `_gemini_day_key()` (Pacific midnight, Gemini's reset), `_month_key()`, `_load_usage()`, `bump_usage(name, period)`, `usage_count(name, period)`. Writes a small JSON at `USAGE_FILE`. Used only for the estimated Gemini/Tavily quota readout. |
 | **Search layer** | `wiki_search(query)` (MediaWiki API over `urllib`: `list=search` top 3 titles → `prop=extracts` intros). `wiktionary_search(query)` (the `w` flag: `_wikt_candidates` picks the word(s) asked about, skipping question words and language names; `_wikt_clean` drops long reference sections and keeps only a language the question names). `tavily_search(query)` (POST `api.tavily.com/search`; bumps the Tavily tally). `web_search(query, live=False)` → Tavily when `live` and a key exists, else Wikipedia. Each takes `sources=[]` and appends the `(title, url)` of every page used, for the link line under the answer. |
@@ -82,7 +82,7 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 - `appendText_()` / `appendFooter_()` — UI mutations; called on the main thread (see
   "Threading").
 - `copyAnswer_()` / `local_keydown()` — the copy feature (⧉ button, ⌘C, ⌘↩ = copy and
-  close), Esc, and ⌘A/⌘C/⌘V/⌘X routing.
+  close; ⌘↩ on a typed line asks it, then copies and closes via `close_when_done`), Esc, and ⌘A/⌘C/⌘V/⌘X routing.
 - `control_textView_doCommandBySelector_()` — Return submits, Esc hides, ↑/↓ step through
   `self.recall` (the lines asked since launch).
 - `_quota_footer()` — builds the dim italic quota line under each answer.
@@ -125,18 +125,20 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
   headers into `stats`); Gemini and Tavily are **local estimates** counted in `USAGE_FILE`
   (the APIs don't report remaining quota).
 - **Model names vary by account.** A `404 model does not exist` means the user's key can't
-  access `GROQ_MODEL`/`GEMINI_MODEL`; the fix is to change that constant, not the code.
+  access `GROQ_MODEL`/`GEMINI_MODEL`; the fix is to set that line in `derpderp_config.py`, not the code.
 - **Single-instance lock:** `main()` holds an `fcntl.flock` on `LOCK_FILE`; a second
   instance exits cleanly. Relevant if the user runs it manually *and* via the LaunchAgent.
-- **Keys:** the public copy has blank inline keys in CONFIG, and pasting a key there
-  works. To keep keys out of the script instead (safer if the user ever shares or commits
-  it), no code change is needed: put `export GROQ_POPUPSEARCH="gsk_..."` (and
+- **Settings:** the user's own values go in `derpderp_config.py`, never in `derpderp.py`
+  (an update to the script would overwrite them). A typo there stops DerpDerp at launch
+  with the line it's on; an unknown name is logged and ignored.
+- **Keys:** pasting a key into `derpderp_config.py` works. To keep keys out of files
+  instead, no code change is needed: put `export GROQ_POPUPSEARCH="gsk_..."` (and
   `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH`) in `~/.secrets` or the environment;
   `load_secret` reads those first.
 - **`%` lines:** a line starting `% ` never reaches an LLM. It runs `PERCENT_COMMAND`
   (blank = off, and the panel says so) with the rest of the line as the last argument,
   for hooking DerpDerp to the user's own note or to-do tool. `DERPDERP_PERCENT_COMMAND`
-  in the environment or `~/.secrets` wins over CONFIG. The `/help` "ESTATE" section
+  in the environment or `~/.secrets` wins over `derpderp_config.py`. The `/help` "ESTATE" section
   describes the author's own to-do tool's syntax; it means nothing without that tool.
 - **Auto-start:** if the user set up the optional macOS **LaunchAgent**, edits to
   `derpderp.py` don't take effect until they reload it:
@@ -147,8 +149,8 @@ The user steers both with leading modifiers (see "Modifier parsing" below).
 
 | The user wants to… | Change this |
 |---|---|
-| Rebind the hotkey / tune the double-tap speed | `RIGHT_CMD_KEYCODE`, `DOUBLE_TAP_TIMEOUT` (CONFIG) |
-| Use different models | `GROQ_MODEL`, `GEMINI_MODEL` (CONFIG) |
+| Rebind the hotkey / tune the double-tap speed | `RIGHT_CMD_KEYCODE`, `DOUBLE_TAP_TIMEOUT` (`derpderp_config.py`) |
+| Use different models | `GROQ_MODEL`, `GEMINI_MODEL` (`derpderp_config.py`) |
 | Change answer tone/length | `SYSTEM`; for `\d` raw mode, `DIRECT_INSTRUCTION` |
 | Add or change a modifier | the parser in `Controller.submit()` |
 | Resize / restyle the panel | `PANEL_W`/`INPUT_H`/`FIELD_H`/`ANSWER_H`/`SIDE` + `_build()` (blur material, corner radius, fonts, colors) |

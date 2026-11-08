@@ -14,16 +14,18 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \d \\d    direct: a bare, paste-ready plaintext answer, copied for you
     \c \\c    copy the answer to the clipboard when it's done
     \p \\p    send what you copied (⌘C) along with the question you type
-    %         hand the line to your own command (optional: PERCENT_COMMAND in CONFIG)
+    %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py)
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
-⌘↩ copies the last answer and closes, /history shows the last 10 answers.
+⌘↩ copies the answer and closes (on a typed line: asks it first), /history
+shows the last 10 answers.
 
 ──────────────────────────────────────────────────────────────────────────
 SETUP (3 steps)
   1. Install the dependency:
         pip3 install pyobjc-framework-Cocoa
-  2. Paste at least one API key into the CONFIG section just below
-     (a free Groq key alone is enough to get started).
+  2. Copy derpderp_config.example.py to derpderp_config.py (same folder) and
+     paste at least one API key into it (a free Groq key alone is enough to
+     get started).
   3. Run it:
         python3 derpderp.py
 
@@ -94,61 +96,57 @@ from Foundation import NSObject, NSAttributedString, NSMutableAttributedString, 
 from PyObjCTools import AppHelper
 
 # ============================================================================
-#  CONFIG  ───  EDIT THIS SECTION
+#  SETTINGS  ───  change them in derpderp_config.py, not here
 # ============================================================================
+# These are the defaults. Your own values go in derpderp_config.py next to this
+# script: copy derpderp_config.example.py (which explains every setting) to that
+# name and edit it. Updating derpderp.py then never overwrites your settings.
 
-# --- API keys: paste yours between the quotes on lines 90, 91, 92-------------------------------
-#   Groq   (required): free key at  https://console.groq.com     → "gsk_..."
-#   Tavily (optional): free key at  https://app.tavily.com       → "tvly-..."
-#                      (enables the \s live web-search modifier)
-#   Gemini (optional): free key at  https://aistudio.google.com  → "AIza..."
-#                      (enables the \\ Gemini engine)
-#
-# You can leave any of these blank. With just a Groq key you still get the
-# default engine, Wikipedia context, and every modifier except \s.
 GROQ_API_KEY   = ""
 TAVILY_API_KEY = ""
 GEMINI_API_KEY = ""
-
-# --- Models: change only if your account can't access these -----------------
-GROQ_MODEL   = "openai/gpt-oss-120b"     # your available models: console.groq.com
-GEMINI_MODEL = "gemini-3.5-flash-lite"   # a free model whose search grounding is off
-
-# --- Free-tier caps: only for the quota readout under each answer ------------
-#   (Groq's real remaining count comes live from its response headers; these
-#    two are just local estimates for Gemini and Tavily.)
-GEMINI_DAILY_LIMIT   = 500     # requests/day
-TAVILY_MONTHLY_LIMIT = 1000    # searches/month
-
-# --- Hotkey -----------------------------------------------------------------
-RIGHT_CMD_KEYCODE  = 54        # double-tap this key to toggle (54 = Right ⌘)
-DOUBLE_TAP_TIMEOUT = 0.4       # max seconds between the two taps
-
-# --- Local files (fine to leave as-is) --------------------------------------
+GROQ_MODEL   = "openai/gpt-oss-120b"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_DAILY_LIMIT   = 500
+TAVILY_MONTHLY_LIMIT = 1000
+RIGHT_CMD_KEYCODE  = 54
+DOUBLE_TAP_TIMEOUT = 0.4
 USAGE_FILE = os.path.expanduser("~/.cache/derpderp_usage.json")
 LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
-# Every finished answer is appended here as "Q: ..." / "A: ..." (blank = no history).
 HISTORY_FILE = os.path.expanduser("~/.cache/derpderp_history.txt")
-
-# --- Panel ------------------------------------------------------------------
-KEEP_ANSWER_MINUTES = 5        # reopen within this long and the last answer is still there
-
-# --- `% ` lines (optional; blank = off) --------------------------------------
-# A line typed as `% buy milk` runs this command with "buy milk" added as its
-# last argument, and shows the command's printed output in the panel: a hook
-# for your own note-taking or to-do tool. Example:
-#   PERCENT_COMMAND = "python3 /path/to/add_note.py"
-# A DERPDERP_PERCENT_COMMAND environment variable (or ~/.secrets line) wins.
+KEEP_ANSWER_MINUTES = 5
 PERCENT_COMMAND = ""
+SETTING_NAMES = (
+    "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
+    "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
+    "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
+)
 
-# ============================================================================
-#  END OF CONFIG  ───  you shouldn't need to edit below here
-# ============================================================================
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "derpderp_config.py")
+
+
+def load_config(path, settings):
+    """Overwrite `settings` with the NAME = value lines of the file at `path`, if
+    there is one. A typo in the file stops DerpDerp with the line it's on."""
+    if not os.path.exists(path):
+        return
+    import runpy
+    for name, value in runpy.run_path(path).items():
+        if name in SETTING_NAMES:
+            settings[name] = value
+        elif name.isupper():
+            print("derpderp: %s in %s is not a setting; ignored" % (name, path))
+
+
+load_config(CONFIG_FILE, globals())
+USAGE_FILE = os.path.expanduser(USAGE_FILE)
+LOCK_FILE = os.path.expanduser(LOCK_FILE)
+HISTORY_FILE = os.path.expanduser(HISTORY_FILE)
 
 # --- Keys kept outside this file (optional) ---------------------------------
 # If GROQ_POPUPSEARCH / TAVILY_POPUPSEARCH / GEMINI_POPUPSEARCH is set in your
 # environment, or as an `export NAME="..."` line in ~/.secrets, that value wins
-# over the one pasted in CONFIG. Otherwise the CONFIG value is used.
+# over the one in derpderp_config.py. Otherwise that value is used.
 
 SECRETS_FILE = os.path.expanduser("~/.secrets")
 _secrets_cache = None
@@ -279,7 +277,7 @@ HELP = (
     )),
     ("SHORTCUTS", "", (
         "`↑`\tRecall your earlier questions",
-        "\t`⌘↩` copies the last answer and closes the panel",
+        "\t`⌘↩` copies the answer and closes the panel (after a typed question: asks it first)",
         "\t`/history` shows your last 10 questions and answers",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
@@ -878,6 +876,7 @@ class Controller(NSObject):
         self.tap_time = 0.0       # the last clean tap (0 = none pending)
         self.tap_keys = None
         self.hidden_at = 0.0      # when the panel was last closed (0 = not since it opened)
+        self.close_when_done = False   # ⌘↩ on a typed line: copy the answer and close when it's done
         self.recall = []          # lines asked since launch, for ↑ / ↓
         self.recall_at = None     # which of them the field shows (None = a fresh line)
         self._build()
@@ -1021,6 +1020,7 @@ class Controller(NSObject):
     @objc.python_method
     def show(self):
         self.recall_at = None
+        self.close_when_done = False
         # Reopened soon after closing, with nothing still running: the last answer
         # (and the conversation behind it) is still there, so a stray Esc loses nothing.
         recent = self.hidden_at and time.time() - self.hidden_at < KEEP_ANSWER_MINUTES * 60
@@ -1231,6 +1231,10 @@ class Controller(NSObject):
                 self.appendText_(("\n\n" if text else "") + note)
         self.appendFooter_(footer)
         self.answering = False
+        close, self.close_when_done = self.close_when_done, False
+        if close and self.last_answer:
+            self._copy_to_clipboard(self.last_answer)
+            self.hide()
 
     @objc.python_method
     def _save_history(self, question, answer):
@@ -1262,7 +1266,7 @@ class Controller(NSObject):
             self.appendText_("\n".join(e.strip() + "\n" for e in entries))
         else:
             self.appendText_("No history yet." if HISTORY_FILE else
-                             "History is off: set HISTORY_FILE in CONFIG.")
+                             "History is off: set HISTORY_FILE in derpderp_config.py.")
 
     @objc.python_method
     def _append_sources(self, sources, limit=5):
@@ -1303,7 +1307,7 @@ class Controller(NSObject):
             out = "% command failed"
             try:
                 if not PERCENT_COMMAND:
-                    out = "% lines are off: set PERCENT_COMMAND in CONFIG."
+                    out = "% lines are off: set PERCENT_COMMAND in derpderp_config.py."
                 else:
                     r = subprocess.run(shlex.split(PERCENT_COMMAND) + [line],
                                        capture_output=True, text=True, timeout=20)
@@ -1431,7 +1435,17 @@ class Controller(NSObject):
         if event.keyCode() == ESCAPE_KEYCODE:
             self.hide()
             return None
-        # ⌘↩ copies the last answer and closes (an unasked line in the field still submits).
+        # ⌘↩ on a typed line asks it, then copies the answer and closes once it's done.
+        if (
+            event.keyCode() in RETURN_KEYCODES
+            and (event.modifierFlags() & NSEventModifierFlagCommand)
+            and self.input.stringValue().strip()
+            and not self.answering
+        ):
+            self.submit()
+            self.close_when_done = self.answering   # a hint or /help asks nothing: stay open
+            return None
+        # ⌘↩ on an empty field copies the last answer and closes.
         if (
             event.keyCode() in RETURN_KEYCODES
             and (event.modifierFlags() & NSEventModifierFlagCommand)

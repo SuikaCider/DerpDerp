@@ -12,6 +12,9 @@ venv/
 .idea/
 .vscode/
 
+# Your own settings (copied from derpderp_config.example.py)
+derpderp_config.py
+
 # Local runtime state (normally lives in ~/.cache, ignored here just in case)
 *.log
 derpderp_usage.json
