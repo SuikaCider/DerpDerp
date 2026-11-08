@@ -18,6 +18,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
               with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it;
               PERCENT_SUGGEST_URL asks a running app for the same answer first (faster);
               with PERCENT_MAKE_COMMAND set, Enter on a path not made yet asks "Make it? Y / N"
+    $         with PERCENT_COMMAND set: a status line, handed over whole ("$ <item> done"); the
+              suggest answer offers matching items (` takes one) and says what's missing
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers.
@@ -298,6 +300,8 @@ HELP = (
         "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
         "\tAfter a `#` or `@`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
+        "`$`\tSet an item's status: type part of its name, the backtick key takes it,",
+        "\tthen `done`, `wip`, `next`, `waiting` or `killed {why}`",
     )),
 )
 HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
@@ -1150,10 +1154,15 @@ class Controller(NSObject):
             return
 
         # `% ` — hand the line to PERCENT_COMMAND; no LLM. A `#` path not made yet asks first.
-        if question.startswith("% "):
-            line = self.input.stringValue()
-            if (PERCENT_MAKE_COMMAND and "#" in line and (PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND)
-                    and not self._current_hint()):
+        # `$ ` (with PERCENT_COMMAND set) — a status line, handed over whole; one its hint
+        # says isn't ready (no status yet, killed without a why) stays in the field.
+        line = self.input.stringValue()
+        dollar = bool(PERCENT_COMMAND) and line.startswith("$ ")
+        if question.startswith("% ") or dollar:
+            if dollar and not line[2:].strip():
+                return
+            if ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and not self._current_hint()
+                    and (dollar or (PERCENT_MAKE_COMMAND and "#" in line))):
                 if self.enter_waits != line:   # its hint isn't here yet: ask now, decide on the answer
                     self.enter_waits = line
                     self.suggest_seq += 1
@@ -1369,8 +1378,15 @@ class Controller(NSObject):
 
     @objc.python_method
     def _percent_enter(self, line):
-        """Enter on a `% ` line: a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND), else run it."""
+        """Enter on a `% ` / `$ ` line: a `$` line its hint says isn't ready stays put (the hint says
+        why); a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND); else run it."""
         t = self._current_hint()
+        if line.startswith("$ "):
+            if t and t.get("mode") == "status" and t.get("problem"):
+                self._show_hint()
+                return
+            self._run_percent(line.strip(), shown=line.strip())
+            return
         if PERCENT_MAKE_COMMAND and t and t["place"].get("state") == "missing":
             self.asking = True
             self._show_hint()
@@ -1378,7 +1394,7 @@ class Controller(NSObject):
         self._run_percent(line[2:].strip())
 
     @objc.python_method
-    def _run_percent(self, line, make=False):
+    def _run_percent(self, line, make=False, shown=None):
         """Run PERCENT_COMMAND (PERCENT_MAKE_COMMAND for a Y) with `line` as its last argument and show
         what it printed."""
         command = PERCENT_MAKE_COMMAND if make else PERCENT_COMMAND
@@ -1387,7 +1403,7 @@ class Controller(NSObject):
         self._begin()
         session = self.session
         prefix = "\n\n" if self.answer.string() else ""
-        self.appendText_("%s\u203a %% %s\n\n" % (prefix, line))
+        self.appendText_("%s\u203a %s\n\n" % (prefix, shown or "% " + line))
         self._grow()
 
         def worker():
@@ -1428,6 +1444,9 @@ class Controller(NSObject):
     # partial day ("call @t") also gets "days": {"partial": "t", "options": [{"word": "today",
     # "date": "2026-11-08", "label": "Sun 11-08"}, ...]}: its words are offered first (greyed,
     # ` takes one plus a space, ↑ / ↓), even on a `#` line.
+    # A `$ ` line (with PERCENT_COMMAND set) is asked with the `$ ` kept and answered
+    # {"mode": "status", "partial", "status": null or the typed status word, "items": [{"path",
+    # "display", "state"}], "problem": null or why Enter can't set it yet}; ` takes an item's path.
     # With PERCENT_SUGGEST_URL set, a GET of that URL with ?q=<the same line> is tried first
     # (a running app answers in well under the command's start-up time); no answer within
     # SUGGEST_URL_TIMEOUT, or no JSON, and the command is asked as before.
@@ -1443,7 +1462,8 @@ class Controller(NSObject):
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
-        if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and line.startswith("% ") and line[2:].strip()):
+        typed = (line.startswith("% ") and line[2:].strip()) or (PERCENT_COMMAND and line.startswith("$ "))
+        if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and typed):
             self.typed = None
             self._show_hint()
             return
@@ -1456,7 +1476,7 @@ class Controller(NSObject):
         session = self.session
 
         def worker():
-            q, data = line[2:].strip(), None
+            q, data = (line if line.startswith("$ ") else line[2:].strip()), None   # `$ ` kept
             if PERCENT_SUGGEST_URL:
                 try:
                     url = "%s%s%s" % (PERCENT_SUGGEST_URL, "&" if "?" in PERCENT_SUGGEST_URL else "?",
@@ -1492,7 +1512,9 @@ class Controller(NSObject):
         ok = (data.get("mode") == "file" and isinstance(place, dict)
               and isinstance(place.get("suggest", []), list)) if place else False
         plain = isinstance(data, dict) and data.get("mode") in ("add", "remind") and place is None
-        self.typed = dict(data, q=line) if ok else dict(data, q=line, place={}) if plain else None
+        status = (isinstance(data, dict) and data.get("mode") == "status" and isinstance(data.get("items"), list)
+                  and all(isinstance(i, dict) and isinstance(i.get("path"), str) for i in data["items"]))
+        self.typed = dict(data, q=line) if ok else dict(data, q=line, place={}) if plain or status else None
         self.choice = 0
         self._show_hint()
         if self.enter_waits == line:   # Enter was pressed before this answer: act on it now
@@ -1513,6 +1535,8 @@ class Controller(NSObject):
         t = self.typed or {}
         if t.get("days"):
             return "day", [o["word"] for o in t["days"]["options"]]
+        if t.get("mode") == "status":   # a `$` line: the items, until a status is typed
+            return "item", [] if t.get("status") else [i["path"] for i in t["items"]]
         return "name", (t.get("place") or {}).get("suggest") or []
 
     @objc.python_method
@@ -1569,6 +1593,21 @@ class Controller(NSObject):
             self._draw_ghost(t["q"], word[len(partial):] if word.lower().startswith(partial.lower())
                              and t["q"].endswith(partial) else "")
             return
+        if t.get("mode") == "status":   # a `$` line: the item it hits, and what Enter needs
+            items, problem, tip = t["items"], t.get("problem"), ""
+            if items:
+                k = self.choice % len(items)
+                it = items[k]
+                tip = "→ %s (%s)" % (it.get("display") or it["path"], it.get("state") or "")
+                if names and t["q"][2:].strip() != it["path"]:
+                    tip += " · ` takes it" + (" (%d of %d, ↑/↓)" % (k + 1, len(items)) if len(items) > 1 else "")
+            if problem:
+                tip += (" · " if tip else "") + problem
+            elif t.get("status"):
+                tip += " · Enter sets it to %s" % t["status"]
+            self.ghost.setHidden_(True)
+            self._show_tip(tip)
+            return
         if t.get("mode") in ("add", "remind"):   # no `#`: say where Enter puts it
             tip = ("⏰ Inbox %s · Enter files it in Inbox with this reminder" % day if t["mode"] == "remind"
                    else "＋ Adhoc · Enter adds it to Adhoc")
@@ -1613,7 +1652,9 @@ class Controller(NSObject):
         if not t or not name:
             return False
         line = t["q"]
-        if self._offers()[0] == "day":   # the partial @day becomes the word, then a space
+        if self._offers()[0] == "item":   # a `$` line: the item's path, then a space for the status
+            self.input.setStringValue_("$ " + name + " ")
+        elif self._offers()[0] == "day":   # the partial @day becomes the word, then a space
             partial = t["days"]["partial"]
             if not line.endswith(partial):
                 return False
