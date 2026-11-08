@@ -21,6 +21,7 @@ DerpDerp/
 ├── README.md                     ← setup guide (start here)
 ├── assets/                       ← the screenshot in this README
 ├── derpderp.py                   ← the whole tool
+├── derpderp_config.example.py    ← your settings start here
 └── troubleshooting/              ← for when it breaks
     ├── README.md                 ← what to do when stuck
     └── ask-llm-for-help.md       ← context to feed your LLM
@@ -100,26 +101,28 @@ You're probably reading this on the DerpDerp page on GitHub. To actually get the
 
 ### 4. Configure
 
-After downloading, right-click `derpderp.py` and open it with an editor of your choice. I use TextEdit. Located conveniently at the very top of the file, you'll see a **CONFIG** block. 
+DerpDerp's settings live in their own file, so updating `derpderp.py` later never wipes them. In the DerpDerp folder, duplicate `derpderp_config.example.py` and name the copy `derpderp_config.py` (or, in `Terminal`: `cp derpderp_config.example.py derpderp_config.py`). Then right-click `derpderp_config.py` and open it with an editor of your choice. I use TextEdit.
 
-It looks like this:
+At the top, you'll see the API keys:
 
 🖥️
 ```python
-GROQ_API_KEY   = "put-your-groq-key-here"
-TAVILY_API_KEY = ""      # leave blank if you don't have one
-GEMINI_API_KEY = ""      # leave blank if you don't have one
+GROQ_API_KEY   = ""
+TAVILY_API_KEY = ""
+GEMINI_API_KEY = ""
 ```
 
-Take your API keys from the GET YOUR KEYS step and paste them directly into the CONfIG block, right in the middle of those"quote marks".
+Take your API keys from the GET YOUR KEYS step and paste them right in the middle of those "quote marks". Leave a line blank if you don't have that key.
 
-Below the API keys section, you've got a few other options:
-- **Models** → Swap out the models DerpDerp uses here
-- **Limits** → Information about current (August 2026) rate limits of Groq/Tavily/Gemini
+Below the API keys, you've got a few other options ([Appendix A](#appendix-a--config-block-reference) explains each one):
+- **Models** → Swap out the models DerpDerp uses
+- **Limits** → The free-tier caps behind the quota readout under each answer (changing them changes the readout, not any real limit)
 - **Hotkey** → Change the key you double-tap to open DerpDerp
-- **LocalFile** → DerpDerp makes two additional files when run for the first time; their location will presumably be here
+- **Local files** → Where DerpDerp keeps its usage tally, its lock file, and your answer history
+- **Panel** → How long a closed panel keeps your last answer
+- **`%` lines** → Optional: hand a line to your own note or to-do script
 
-> ‼️ **Read if you're a clueless vibe coder** <br> For my own convenience, I've set up the public version of DerpDerp to expect readable hardcoded keys in the CONFIG section. If you fork this to a public repo on your profile, your keys will be visible. That's no bueno. It means other people can steal your keys. In my own private copy, the CONFIG lines don't hold the keys at all. Instead, each one *reads* its key from a separate hidden file on my Mac when DerpDerp starts up, so the real keys never live inside the script (and never get committed to GitHub (so you nerds can't steal my free, limited-at-$0.00 keys)). If you want to do the same, ask your LLM how to load keys from a hidden dotfile like `~/.secrets`. 
+> ‼️ **Read if you're a clueless vibe coder** <br> Git ignores `derpderp_config.py`, so if you fork this to a public repo, your keys stay on your Mac. Want them out of files altogether? Put `export GROQ_POPUPSEARCH="gsk_..."` (and `TAVILY_POPUPSEARCH`, `GEMINI_POPUPSEARCH`) in a hidden file called `~/.secrets`. DerpDerp reads those first, so the keys never live in the DerpDerp folder at all. That's how I run my own copy (so you nerds can't steal my free, limited-at-$0.00 keys).
 
 ### 5. First run & permissions
 
