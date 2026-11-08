@@ -297,7 +297,7 @@ HELP = (
         "`%`\tLog an item into To Derp's inbox",
         "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
-        "\tAfter a `#`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
+        "\tAfter a `#` or `@`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
     )),
 )
 HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
@@ -1424,7 +1424,10 @@ class Controller(NSObject):
     #      "suggest" holds the closest names instead (a typo)}}
     # The first suggested name shows greyed after the cursor; ` takes it (plus a /),
     # ↑ / ↓ offer the others, and a hint line under the bar says what Enter will do: for a
-    # line with no `#` ("add" / "remind"), `＋ Adhoc` or `⏰ Inbox <day>`.
+    # line with no `#` ("add" / "remind"), `＋ Adhoc` or `⏰ Inbox <day>`. A line ending in a
+    # partial day ("call @t") also gets "days": {"partial": "t", "options": [{"word": "today",
+    # "date": "2026-11-08", "label": "Sun 11-08"}, ...]}: its words are offered first (greyed,
+    # ` takes one plus a space, ↑ / ↓), even on a `#` line.
     # With PERCENT_SUGGEST_URL set, a GET of that URL with ?q=<the same line> is tried first
     # (a running app answers in well under the command's start-up time); no answer within
     # SUGGEST_URL_TIMEOUT, or no JSON, and the command is asked as before.
@@ -1479,6 +1482,12 @@ class Controller(NSObject):
     def _got_suggest(self, seq, line, data):
         if seq != self.suggest_seq or self.input.stringValue() != line:
             return   # an answer for text no longer in the field
+        if isinstance(data, dict):
+            days = data.get("days")
+            if not (isinstance(days, dict) and isinstance(days.get("partial"), str) and days["partial"]
+                    and isinstance(days.get("options"), list) and days["options"]
+                    and all(isinstance(o, dict) and isinstance(o.get("word"), str) for o in days["options"])):
+                data = dict(data, days=None)
         place = data.get("place") if isinstance(data, dict) else None
         ok = (data.get("mode") == "file" and isinstance(place, dict)
               and isinstance(place.get("suggest", []), list)) if place else False
@@ -1498,9 +1507,45 @@ class Controller(NSObject):
         return None
 
     @objc.python_method
+    def _offers(self):
+        """What ` and ↑ / ↓ work on: ("day", words) while a partial @day is offered (ahead of any
+        `#` names), else ("name", the `#` path's names)."""
+        t = self.typed or {}
+        if t.get("days"):
+            return "day", [o["word"] for o in t["days"]["options"]]
+        return "name", (t.get("place") or {}).get("suggest") or []
+
+    @objc.python_method
     def _suggestion(self):
-        names = (self.typed or {}).get("place", {}).get("suggest") or []
+        names = self._offers()[1]
         return names[self.choice % len(names)] if names else None
+
+    @objc.python_method
+    def _show_tip(self, tip):
+        self.tip.setStringValue_(tip)
+        self.tip.setHidden_(False)
+        self._set_tip_h(TIP_H)
+
+    @objc.python_method
+    def _draw_ghost(self, line, rest):
+        """Grey `rest` in right after the typed `line`, only with the cursor at its end."""
+        editor = self.input.currentEditor()
+        at_end = editor is None or (
+            editor.selectedRange().length == 0
+            and editor.selectedRange().location == len(line.encode("utf-16-le")) // 2)
+        if not rest or not at_end:
+            self.ghost.setHidden_(True)
+            return
+        font = {NSFontAttributeName: self.input.font()}
+        typed_w = NSAttributedString.alloc().initWithString_attributes_(line, font).size().width
+        rest_w = NSAttributedString.alloc().initWithString_attributes_(rest, font).size().width + 8
+        if typed_w + rest_w > self.input.frame().size.width:
+            self.ghost.setHidden_(True)   # the line has scrolled: nowhere true to draw it
+            return
+        f = self.input.frame()
+        self.ghost.setStringValue_(rest)
+        self.ghost.setFrame_(NSMakeRect(f.origin.x + typed_w, f.origin.y, rest_w, f.size.height))
+        self.ghost.setHidden_(False)
 
     @objc.python_method
     def _show_hint(self):
@@ -1513,6 +1558,17 @@ class Controller(NSObject):
                 self._set_tip_h(0)
             return
         p, day, name = t["place"], t.get("day"), self._suggestion()
+        kind, names = self._offers()
+        if kind == "day":   # a partial @day: its words first, even on a `#` line
+            k = self.choice % len(names)
+            opt, partial = t["days"]["options"][k], t["days"]["partial"]
+            self._show_tip("⏰ %s → %s · ` takes it%s" % (
+                opt["word"], opt.get("label") or opt.get("date") or "",
+                " (%d of %d, ↑/↓)" % (k + 1, len(names)) if len(names) > 1 else ""))
+            word = opt["word"]
+            self._draw_ghost(t["q"], word[len(partial):] if word.lower().startswith(partial.lower())
+                             and t["q"].endswith(partial) else "")
+            return
         if t.get("mode") in ("add", "remind"):   # no `#`: say where Enter puts it
             tip = ("⏰ Inbox %s · Enter files it in Inbox with this reminder" % day if t["mode"] == "remind"
                    else "＋ Adhoc · Enter adds it to Adhoc")
@@ -1543,42 +1599,31 @@ class Controller(NSObject):
             tip = "%s goes past 6 levels: file it higher up" % path
         else:
             tip = "Type an Area’s name after the #"
-        self.tip.setStringValue_(tip + more)
-        self.tip.setHidden_(False)
-        self._set_tip_h(TIP_H)
+        self._show_tip(tip + more)
 
         # The greyed rest: only for a name the typed part starts, with the cursor at the end.
         line, partial = t["q"], p.get("partial") or ""
-        editor = self.input.currentEditor()
-        at_end = editor is None or (
-            editor.selectedRange().length == 0
-            and editor.selectedRange().location == len(line.encode("utf-16-le")) // 2)
-        rest = (name[len(partial):] if name and not p.get("close") and not day and not self.asking
-                and line.endswith(partial) and at_end else "")
-        if not rest:
-            self.ghost.setHidden_(True)
-            return
-        font = {NSFontAttributeName: self.input.font()}
-        typed_w = NSAttributedString.alloc().initWithString_attributes_(line, font).size().width
-        rest_w = NSAttributedString.alloc().initWithString_attributes_(rest, font).size().width + 8
-        if typed_w + rest_w > self.input.frame().size.width:
-            self.ghost.setHidden_(True)   # the line has scrolled: nowhere true to draw it
-            return
-        f = self.input.frame()
-        self.ghost.setStringValue_(rest)
-        self.ghost.setFrame_(NSMakeRect(f.origin.x + typed_w, f.origin.y, rest_w, f.size.height))
-        self.ghost.setHidden_(False)
+        self._draw_ghost(line, name[len(partial):] if name and not p.get("close") and not day
+                         and not self.asking and line.endswith(partial) else "")
 
     @objc.python_method
     def _take_suggestion(self):
         """`: the offered name replaces the path's last part, then a /. False = nothing to take."""
         t, name = self._current_hint(), self._suggestion()
-        if not t or not name or t.get("day"):
+        if not t or not name:
             return False
         line = t["q"]
-        at = line.rfind("#")
-        path = line[at + 1:]
-        self.input.setStringValue_(line[:at + 1] + path[:path.rfind("/") + 1] + name + "/")
+        if self._offers()[0] == "day":   # the partial @day becomes the word, then a space
+            partial = t["days"]["partial"]
+            if not line.endswith(partial):
+                return False
+            self.input.setStringValue_(line[:len(line) - len(partial)] + name + " ")
+        elif t.get("day"):
+            return False
+        else:
+            at = line.rfind("#")
+            path = line[at + 1:]
+            self.input.setStringValue_(line[:at + 1] + path[:path.rfind("/") + 1] + name + "/")
         editor = self.input.currentEditor()
         if editor is not None:
             editor.setSelectedRange_((len(self.input.stringValue().encode("utf-16-le")) // 2, 0))
@@ -1768,8 +1813,8 @@ class Controller(NSObject):
             self.submit()
             return True
         t = self._current_hint()
-        if sel in ("moveUp:", "moveDown:") and t and len(t["place"].get("suggest") or []) > 1:
-            # a `#` hint with several names: ↑ / ↓ offer the others, ahead of recall
+        if sel in ("moveUp:", "moveDown:") and t and len(self._offers()[1]) > 1:
+            # a hint with several names or days: ↑ / ↓ offer the others, ahead of recall
             self.choice += -1 if sel == "moveUp:" else 1
             self._show_hint()
             return True
