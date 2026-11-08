@@ -276,14 +276,22 @@ To do this:
 
 `\Groq` and `\\Gemini` can take additional tags to alter their functionality:
 - `s` routes your query through Tavily to pull results from the live web
-- `d` tells the LLM to provide the direct answer, and nothing but it, in plaintext
+- `w` looks your word up on Wiktionary (meanings, IPA, etymology)
+- `d` tells the LLM to provide the direct answer, and nothing but it, in plaintext, and copies it to your clipboard for you
+- `c` copies the answer to your clipboard when it's done
+- `p` sends whatever you've copied (⌘C) along with your question. Copy an error message, then type `\p what does this mean`
 
 Here are some example queries for you:
 - `what's the capital of peru` → no modifiers → DerpDerp searches Wikipedia to answer you
 - `\s how much is bitcoin rn` → groq and search modifier → DerpDerp runs your query through Tavily so Groq can answer you
 - `\\sd what's the html string to insert a zero-width space` → gemini, search, and direct modifiers → DerpDerp runs your query through Tavily, hands the answer to Gemini, and tells Gemini to answer you as directly as possible... hopefully in a way you can directly copy/paste into whatever you're working on
+- `\wc french prendre ipa` → groq, Wiktionary, and copy modifiers → DerpDerp looks "prendre" up on Wiktionary, Groq answers, and the answer lands on your clipboard
 
 These tags can be inserted in any order. `\\sd` and `\\ds` do the same thing.
+
+> ‼️ **Tags only work glued to the backslash.** `\wc prendre ipa` works. `wc prendre ipa` (no backslash) is just a question, and DerpDerp asks Wikipedia about "wc prendre ipa". Yes, I did this myself. Leave a space between the tags and your question, too.
+
+A line starting with `% ` never goes to an LLM. It hands the rest of the line to a command of your own (`PERCENT_COMMAND` in your settings file), like a note-taking or to-do script. It's off unless you set it.
 
 You can also see this information by typing `/help` when DerpDerp first opens.
 
@@ -319,7 +327,10 @@ A leading **backslash marks a command**; letters attached to it are **flags**.
 - **1 backslash (`\`)** → Groq engine, no Wikipedia.
 - **2 backslashes (`\\`)** → Gemini engine, no Wikipedia.
 - **flag `s`** → add a Tavily live-web search.
-- **flag `d`** → direct/raw output (bare answer, no formatting).
+- **flag `w`** → add a Wiktionary lookup.
+- **flag `d`** → direct/raw output (bare answer, no formatting), copied to your clipboard.
+- **flag `c`** → copy the answer to your clipboard when it's done.
+- **flag `p`** → send your clipboard's text along with the question.
 
 Flags come right after the backslash(es), before your question, in any order:
 
@@ -333,8 +344,10 @@ Flags come right after the backslash(es), before your question, in any order:
 | `\sd question` / `\ds question` | Groq | Tavily | ✅ |
 | `\\s question` | Gemini | Tavily | — |
 | `\\sd question` | Gemini | Tavily | ✅ |
+| `\w question` | Groq | Wiktionary | — |
+| `\ws question` | Groq | Wiktionary + Tavily | — |
 
-A leading `?` (or any character that isn't a flag) is treated as part of your question, so normal questions never trigger a modifier by accident.
+Flags are read only right after a backslash, and only when every letter there is a flag: `\what is…` is just a question. With no backslash, the whole line is your question. A flag with nothing after it (`\p` alone) shows a hint and asks nothing. A line starting with `% ` goes to `PERCENT_COMMAND` instead of an LLM.
 
 ### Appendix D — The LaunchAgent, explained
 
