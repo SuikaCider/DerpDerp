@@ -48,7 +48,6 @@ DerpDerp/
 - [Something broke? Ask a robot](#part-iii--troubleshoot-it)
 
 **Reference**
-- [A. Config block reference](#appendix-a--config-block-reference)
 - [B. Modifier grammar (full)](#appendix-b--modifier-grammar-full)
 - [D. The LaunchAgent, explained](#appendix-d--the-launchagent-explained)
 - [E. Errors with explanations](#appendix-e--errors-with-explanations)
@@ -114,7 +113,7 @@ GEMINI_API_KEY = ""
 
 Take your API keys from the GET YOUR KEYS step and paste them right in the middle of those "quote marks". Leave a line blank if you don't have that key.
 
-Below the API keys, you've got a few other options ([Appendix A](#appendix-a--config-block-reference) explains each one):
+Below the API keys, you've got a few other options (the file explains each one):
 - **Models** → Swap out the models DerpDerp uses
 - **Limits** → The free-tier caps behind the quota readout under each answer (changing them changes the readout, not any real limit)
 - **Hotkey** → Change the key you double-tap to open DerpDerp
@@ -308,20 +307,6 @@ Something broke, or you want to change how DerpDerp works? Head to the [`trouble
 ---
 
 ## REFERENCE
-
-## Appendix A — Config block reference
-
-Everything you can edit lives in the `CONFIG` block at the top of the file.
-
-| Setting | What it does |
-|---|---|
-| `GROQ_API_KEY` / `TAVILY_API_KEY` / `GEMINI_API_KEY` | Your keys. Blank = that provider is disabled (the tool degrades gracefully). |
-| `GROQ_MODEL` | Which Groq model answers. ⚠️ If you get a `404`, your account can't access this one — pick another from [console.groq.com](https://console.groq.com). |
-| `GEMINI_MODEL` | Which Gemini model answers (a free-tier model with search grounding off). |
-| `GEMINI_DAILY_LIMIT` / `TAVILY_MONTHLY_LIMIT` | Only used for the quota readout's `~` estimate. Changing them does **not** change any real limit — just the displayed number. |
-| `RIGHT_CMD_KEYCODE` | Which key double-tap opens the panel (`54` = Right ⌘). |
-| `DOUBLE_TAP_TIMEOUT` | Max seconds between the two taps. |
-| `USAGE_FILE` / `LOCK_FILE` | Where the tool keeps its call-tally and single-instance lock. Fine to leave as-is. |
 
 ### Appendix B — Modifier grammar (full)
 

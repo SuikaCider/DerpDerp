@@ -23,6 +23,7 @@ GEMINI_API_KEY = ""
 
 # --- Models: change only if your account can't access these -----------------
 GROQ_MODEL   = "openai/gpt-oss-120b"     # your available models: console.groq.com
+# (a 404 error means your account can't use this one; pick another at console.groq.com)
 GEMINI_MODEL = "gemini-3.5-flash-lite"   # a free model whose search grounding is off
 
 # --- Free-tier caps: only for the quota readout under each answer ------------
