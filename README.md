@@ -296,6 +296,14 @@ These tags can be inserted in any order. `\\sd` and `\\ds` do the same thing.
 
 A line starting with `% ` never goes to an LLM. It hands the rest of the line to a command of your own (`PERCENT_COMMAND` in your settings file), like a note-taking or to-do script. It's off unless you set it.
 
+If your command can also guess where a line will go, three more settings make typing `% ` lines nicer. Each is off unless you set it:
+
+- `PERCENT_SUGGEST_COMMAND`: while you type a `% ` line, DerpDerp asks this command what Enter would do and shows the answer in a hint line under the bar. For a `#area/project` path, the name it predicts shows greyed after your cursor: `` ` `` (backtick) takes it, and ↑/↓ cycle through the others.
+- `PERCENT_SUGGEST_URL`: the same question, asked of an app you already have running (a web address). It's asked first, because it answers much faster than starting a command. When it doesn't answer, DerpDerp falls back to `PERCENT_SUGGEST_COMMAND`.
+- `PERCENT_MAKE_COMMAND`: when the `#` path you typed doesn't exist yet, Enter asks "Make it? Y / N". Y runs this command to make the path and file the line there; N runs `PERCENT_COMMAND` as usual.
+
+What each command is handed, and what it has to print back, is described in `derpderp_config.example.py`.
+
 You can also see this information by typing `/help` when DerpDerp first opens.
 
 ### 13. The quota readout
