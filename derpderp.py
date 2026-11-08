@@ -1414,7 +1414,7 @@ class Controller(NSObject):
 
     # ---- `% ... #path` prediction (PERCENT_SUGGEST_URL, else PERCENT_SUGGEST_COMMAND)
     #
-    # While a `% ` line holding a `#` is typed, the suggest command is asked (after
+    # While a `% ` line is typed, the suggest command is asked (after
     # SUGGEST_DELAY of no typing) what the line would do. It takes the line (the
     # `% ` removed) as its last argument and prints one JSON line:
     #   {"mode": "add" | "remind" | "file", "day": "Mon 11-09" or null, "title": ...,
@@ -1423,7 +1423,8 @@ class Controller(NSObject):
     #      "suggest": [names the partial starts], "close": true when it starts none and
     #      "suggest" holds the closest names instead (a typo)}}
     # The first suggested name shows greyed after the cursor; ` takes it (plus a /),
-    # ↑ / ↓ offer the others, and a hint line under the bar says what Enter will do.
+    # ↑ / ↓ offer the others, and a hint line under the bar says what Enter will do: for a
+    # line with no `#` ("add" / "remind"), `＋ Adhoc` or `⏰ Inbox <day>`.
     # With PERCENT_SUGGEST_URL set, a GET of that URL with ?q=<the same line> is tried first
     # (a running app answers in well under the command's start-up time); no answer within
     # SUGGEST_URL_TIMEOUT, or no JSON, and the command is asked as before.
@@ -1439,7 +1440,7 @@ class Controller(NSObject):
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
-        if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and line.startswith("% ") and "#" in line):
+        if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and line.startswith("% ") and line[2:].strip()):
             self.typed = None
             self._show_hint()
             return
@@ -1481,7 +1482,8 @@ class Controller(NSObject):
         place = data.get("place") if isinstance(data, dict) else None
         ok = (data.get("mode") == "file" and isinstance(place, dict)
               and isinstance(place.get("suggest", []), list)) if place else False
-        self.typed = dict(data, q=line) if ok else None
+        plain = isinstance(data, dict) and data.get("mode") in ("add", "remind") and place is None
+        self.typed = dict(data, q=line) if ok else dict(data, q=line, place={}) if plain else None
         self.choice = 0
         self._show_hint()
         if self.enter_waits == line:   # Enter was pressed before this answer: act on it now
@@ -1511,6 +1513,14 @@ class Controller(NSObject):
                 self._set_tip_h(0)
             return
         p, day, name = t["place"], t.get("day"), self._suggestion()
+        if t.get("mode") in ("add", "remind"):   # no `#`: say where Enter puts it
+            tip = ("⏰ Inbox %s · Enter files it in Inbox with this reminder" % day if t["mode"] == "remind"
+                   else "＋ Adhoc · Enter adds it to Adhoc")
+            self.ghost.setHidden_(True)
+            self.tip.setStringValue_(tip)
+            self.tip.setHidden_(False)
+            self._set_tip_h(TIP_H)
+            return
         names = p.get("suggest") or []
         more = ""
         if name and not day and not self.asking:
