@@ -48,10 +48,10 @@ DerpDerp/
 - [Something broke? Ask a robot](#part-iii--troubleshoot-it)
 
 **Reference**
-- [B. Modifier grammar (full)](#appendix-b--modifier-grammar-full)
-- [D. The LaunchAgent, explained](#appendix-d--the-launchagent-explained)
-- [E. Errors with explanations](#appendix-e--errors-with-explanations)
-- [F. A tour of the code](#appendix-f--a-tour-of-the-code)
+- [A. Modifier grammar (full)](#appendix-a--modifier-grammar-full)
+- [B. The LaunchAgent, explained](#appendix-b--the-launchagent-explained)
+- [C. Errors with explanations](#appendix-c--errors-with-explanations)
+- [D. A tour of the code](#appendix-d--a-tour-of-the-code)
 
 ---
 
@@ -145,7 +145,7 @@ To give DerpDerp these permissions:
 
 After opening DerpDerp, type `capital of france` or something and then hit `Enter`. After a brief delay, you should see `Paris` followed by an update about your Groq quota.
 
-*(If nothing happens, don't panic — head to [Errors with explanations](#appendix-e--errors-with-explanations).)*
+*(If nothing happens, don't panic — head to [Errors with explanations](#appendix-c--errors-with-explanations).)*
 
 ### 7. Using it day-to-day
 
@@ -196,7 +196,7 @@ You won't see anything after running this command... but, if you go ahead and do
 
 > ‼️ **IMPORTANT NOTE** <br> If you move DerpDerp to a new folder later on, you'll need to re-run the above script again. If you don't, it'll keep looking where DerpDerp _used_ to be, find nothing, and do nothing.
 
-The script also holds a **single-instance lock**, so if it's ever started twice (agent + a manual run), the duplicate selflessly heroes itself instead of opening another instance that would eat a very, very small amount of RAM. More detail on that in [Appendix D](#appendix-d--the-launchagent-explained).
+The script also holds a **single-instance lock**, so if it's ever started twice (agent + a manual run), the duplicate selflessly heroes itself instead of opening another instance that would eat a very, very small amount of RAM. More detail on that in [Appendix B](#appendix-b--the-launchagent-explained).
 
 ### 9. Tweaking DerpDerp
 
@@ -312,6 +312,8 @@ Included here you'll see mentioned:
 
 DerpDerp adds a small .json file to your machine to tally up its calls to Gemini and Tavily. On my computer, and presumably also yours, that lives here: `~/.cache/derpderp_usage.json`. 
 
+DerpDerp also saves every finished answer to `~/.cache/derpderp_history.txt` (that's what `/history` reads). To turn that off, set `HISTORY_FILE = ""` in your settings file.
+
 ---
 
 ## PART III — TROUBLESHOOT IT
@@ -322,7 +324,7 @@ Something broke, or you want to change how DerpDerp works? Head to the [`trouble
 
 ## REFERENCE
 
-### Appendix B — Modifier grammar (full)
+### Appendix A — Modifier grammar (full)
 
 A leading **backslash marks a command**; letters attached to it are **flags**.
 
@@ -352,7 +354,7 @@ Flags come right after the backslash(es), before your question, in any order:
 
 Flags are read only right after a backslash, and only when every letter there is a flag: `\what is…` is just a question. With no backslash, the whole line is your question. A flag with nothing after it (`\p` alone) shows a hint and asks nothing. A line starting with `% ` goes to `PERCENT_COMMAND` instead of an LLM.
 
-### Appendix D — The LaunchAgent, explained
+### Appendix B — The LaunchAgent, explained
 
 A **LaunchAgent** is a small `.plist` file macOS reads to run something in your login session. The one in [step 8](#8-make-it-launch-at-login):
 
@@ -367,7 +369,7 @@ launchctl kill TERM gui/$(id -u)/com.derpderp.agent       # stop until next logi
 launchctl bootout gui/$(id -u) "$HOME/Library/LaunchAgents/com.derpderp.agent.plist"   # uninstall / disable
 ```
 
-### Appendix E — Errors with explanations
+### Appendix C — Errors with explanations
 
 For most of your troubleshooting needs, see [troubleshooting](#part-iii--troubleshoot-it).
 
@@ -381,14 +383,14 @@ For the few straightforward things I expect to go wrong, here's a cheatsheet:
 | **Panel stopped appearing after an edit** | Python error on launch → `tail ~/Library/Logs/derpderp.log` for the traceback. |
 | **Answers seem doubled / hotkey acts twice** | Two instances running → the single-instance lock should prevent this; make sure you're not running it manually *and* via the LaunchAgent. |
 
-### Appendix F — A tour of the code
+### Appendix D — A tour of the code
 
 It's one file, roughly in this order:
 
-1. **CONFIG block** — keys, models, caps, hotkey (the only part you edit).
-2. **`wiki_search` / `tavily_search` / `web_search`** — the search layer.
-3. **`stream` (Gemini) / `stream_openai` (Groq) / `llm_stream`** — the LLM layer; `llm_stream` picks the engine.
-4. **`Controller` / `Panel`** — the macOS panel: building the UI, parsing modifiers in `submit()`, streaming text in, the copy button, the quota footer.
-5. **`main()`** — acquires the single-instance lock and registers the global hotkey + ⌘C monitors.
+1. **SETTINGS block + `load_config`** — the built-in defaults, replaced by anything in your `derpderp_config.py`; then `load_secret` lets keys in your environment or `~/.secrets` win.
+2. **`wiki_search` / `wiktionary_search` / `tavily_search` / `web_search`** — the search layer; each one also collects the Sources links shown under the answer.
+3. **`stream` (Gemini) / `stream_openai` (Groq) / `llm_stream`** — the LLM layer; `llm_stream` picks the engine, and hands off to Gemini when Groq is rate limiting.
+4. **`Controller` / `Panel`** — the macOS panel: building the UI, parsing modifiers in `submit()`, streaming text in, the copy button, the quota footer, Sources links, ↑ recall, the kept answer, `/history`, and `%` lines (`_run_percent`).
+5. **`main()`** — acquires the single-instance lock and registers the global hotkey + the key monitors (Esc, ⌘C, ⌘↩, ⌘A/⌘V/⌘X).
 
-To change behavior: the prompt lives in `SYSTEM`; the modifier parsing lives in `Controller.submit()`; the answer format for `\d` lives in `DIRECT_INSTRUCTION`.
+To change behavior: the prompt lives in `SYSTEM`; the modifier parsing lives in `Controller.submit()`; the answer format for `\d` lives in `DIRECT_INSTRUCTION`. Your own settings go in `derpderp_config.py`, never in this file.
