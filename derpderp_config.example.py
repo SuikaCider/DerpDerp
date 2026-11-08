@@ -52,3 +52,11 @@ KEEP_ANSWER_MINUTES = 5        # reopen within this long and the last answer is 
 #   PERCENT_COMMAND = "python3 /path/to/add_note.py"
 # A DERPDERP_PERCENT_COMMAND environment variable (or ~/.secrets line) wins.
 PERCENT_COMMAND = ""
+# Optional, for a tool that files lines under `#area/project` paths: while you
+# type a `% ` line holding a `#`, this command gets the line (without the `% `)
+# as its last argument and prints one JSON line predicting the path's names
+# (the format is described above `_typed_changed` in derpderp.py). The panel
+# greys in the predicted name; the ` key takes it. Example:
+#   PERCENT_SUGGEST_COMMAND = "python3 /path/to/add_note.py --suggest"
+# A DERPDERP_PERCENT_SUGGEST_COMMAND environment variable (or ~/.secrets line) wins.
+PERCENT_SUGGEST_COMMAND = ""

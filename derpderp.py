@@ -14,7 +14,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \d \\d    direct: a bare, paste-ready plaintext answer, copied for you
     \c \\c    copy the answer to the clipboard when it's done
     \p \\p    send what you copied (⌘C) along with the question you type
-    %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py)
+    %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py);
+              with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers.
@@ -116,10 +117,12 @@ LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
 HISTORY_FILE = os.path.expanduser("~/.cache/derpderp_history.txt")
 KEEP_ANSWER_MINUTES = 5
 PERCENT_COMMAND = ""
+PERCENT_SUGGEST_COMMAND = ""
 SETTING_NAMES = (
     "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
     "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
     "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
+    "PERCENT_SUGGEST_COMMAND",
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "derpderp_config.py")
@@ -185,6 +188,7 @@ GROQ_API_KEY   = load_secret("GROQ_POPUPSEARCH")   or GROQ_API_KEY
 TAVILY_API_KEY = load_secret("TAVILY_POPUPSEARCH") or TAVILY_API_KEY
 GEMINI_API_KEY = load_secret("GEMINI_POPUPSEARCH") or GEMINI_API_KEY
 PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
+PERCENT_SUGGEST_COMMAND = load_secret("DERPDERP_PERCENT_SUGGEST_COMMAND") or PERCENT_SUGGEST_COMMAND
 
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
@@ -236,6 +240,8 @@ FIELD_H = 28       # natural height of the text field, centered within the bar
 ANSWER_H = 380
 SIDE = 16          # horizontal inset shared by input, separator and answer text
 PLACEHOLDER_DROP = -4.0   # points the placeholder sits lower than its natural spot
+TIP_H = 22         # the hint line under the bar, shown only while a `% ... #path` hint is up
+SUGGEST_DELAY = 0.25   # seconds of no typing before the suggest command is asked
 
 SYSTEM = (
     "You are a Spotlight-style quick answer overlay. "
@@ -284,6 +290,7 @@ HELP = (
         "`%`\tLog an item into To Derp's inbox",
         "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
+        "\tAfter a `#`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
     )),
 )
 HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
@@ -879,6 +886,10 @@ class Controller(NSObject):
         self.close_when_done = False   # ⌘↩ on a typed line: copy the answer and close when it's done
         self.recall = []          # lines asked since launch, for ↑ / ↓
         self.recall_at = None     # which of them the field shows (None = a fresh line)
+        self.typed = None         # the suggest command's answer for the `% ` line in the field
+        self.choice = 0           # which of its suggested names is offered (↑ / ↓)
+        self.suggest_seq = 0      # bumped on every edit: an answer for older text is dropped
+        self.tip_h = 0            # TIP_H while the hint line shows, else 0
         self._build()
         return self
 
@@ -942,6 +953,22 @@ class Controller(NSObject):
 
         blur.addSubview_(self.input)
 
+        # A `% ... #path` line: the rest of the predicted name, greyed after the
+        # cursor, and a hint line under the bar (what Enter does, what ` takes).
+        self.ghost = NSTextField.labelWithString_("")
+        self.ghost.setFont_(NSFont.systemFontOfSize_(20))
+        self.ghost.setTextColor_(NSColor.placeholderTextColor())
+        self.ghost.setFrame_(NSMakeRect(SIDE, 0, 10, FIELD_H))
+        blur.addSubview_(self.ghost)
+        self.ghost.setHidden_(True)
+        self.tip = NSTextField.labelWithString_("")
+        self.tip.setFont_(NSFont.systemFontOfSize_(12))
+        self.tip.setTextColor_(NSColor.secondaryLabelColor())
+        self.tip.setLineBreakMode_(4)  # NSLineBreakByTruncatingTail
+        self.tip.setFrame_(NSMakeRect(SIDE, 0, PANEL_W - 2 * SIDE, 16))
+        blur.addSubview_(self.tip)
+        self.tip.setHidden_(True)
+
         # Hairline between the question bar and the answer, shown only when expanded.
         self.separator = NSBox.alloc().initWithFrame_(
             NSMakeRect(SIDE, INPUT_H, PANEL_W - 2 * SIDE, 1)
@@ -996,18 +1023,41 @@ class Controller(NSObject):
                 screen = s
                 break
         vf = screen.visibleFrame()
+        height += self.tip_h
         x = vf.origin.x + (vf.size.width - PANEL_W) / 2
         y = vf.origin.y + vf.size.height * 0.72 - height
         self.panel.setFrame_display_animate_(
             NSMakeRect(x, y, PANEL_W, height), True, False
         )
+        self._layout(height)
+
+    @objc.python_method
+    def _layout(self, height):
         # Question bar occupies the top INPUT_H of the panel; the field is
-        # centered within it and the answer fills everything below.
+        # centered within it, the hint line (if up) sits under it, and the
+        # answer fills everything below.
         bar_bottom = height - INPUT_H
-        self.input.setFrameOrigin_((SIDE, bar_bottom + (INPUT_H - FIELD_H) / 2.0))
-        self.separator.setFrameOrigin_((SIDE, bar_bottom))
-        self.scroll.setFrame_(NSMakeRect(0, 0, PANEL_W, bar_bottom))
-        self.copybtn.setFrameOrigin_((PANEL_W - SIDE - 26, bar_bottom - 28))
+        answer_top = bar_bottom - self.tip_h
+        field_y = bar_bottom + (INPUT_H - FIELD_H) / 2.0
+        self.input.setFrameOrigin_((SIDE, field_y))
+        self.ghost.setFrameOrigin_((self.ghost.frame().origin.x, field_y))
+        self.tip.setFrameOrigin_((SIDE, answer_top + 4))
+        self.separator.setFrameOrigin_((SIDE, answer_top))
+        self.scroll.setFrame_(NSMakeRect(0, 0, PANEL_W, answer_top))
+        self.copybtn.setFrameOrigin_((PANEL_W - SIDE - 26, answer_top - 28))
+
+    @objc.python_method
+    def _set_tip_h(self, tip_h):
+        """Grow or shrink the panel for the hint line, its top edge staying put."""
+        if tip_h == self.tip_h:
+            return
+        f = self.panel.frame()
+        height = f.size.height - self.tip_h + tip_h
+        self.tip_h = tip_h
+        self.panel.setFrame_display_animate_(
+            NSMakeRect(f.origin.x, f.origin.y + f.size.height - height, PANEL_W, height), True, False
+        )
+        self._layout(height)
 
     @objc.python_method
     def _grow(self):
@@ -1021,6 +1071,10 @@ class Controller(NSObject):
     def show(self):
         self.recall_at = None
         self.close_when_done = False
+        self.typed = None
+        self.tip_h = 0
+        self.tip.setHidden_(True)
+        self.ghost.setHidden_(True)
         # Reopened soon after closing, with nothing still running: the last answer
         # (and the conversation behind it) is still there, so a stray Esc loses nothing.
         recent = self.hidden_at and time.time() - self.hidden_at < KEEP_ANSWER_MINUTES * 60
@@ -1030,6 +1084,7 @@ class Controller(NSObject):
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
             self.panel.makeKeyAndOrderFront_(None)
             self.panel.makeFirstResponder_(self.input)
+            self._typed_changed()
             return
         # A request still running from before Escape is abandoned: its output is
         # dropped (see _on_main) and new questions work at once.
@@ -1043,6 +1098,7 @@ class Controller(NSObject):
         self.copybtn.setHidden_(True)
         self.copybtn.setTitle_("⧉")
         self.input.setStringValue_("")
+        self.suggest_seq += 1
         self._place(INPUT_H)
         NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         self.panel.makeKeyAndOrderFront_(None)
@@ -1196,6 +1252,7 @@ class Controller(NSObject):
         """Start an operation: busy, field cleared, and no stale answer to copy (A6)."""
         self.answering = True
         self.input.setStringValue_("")
+        self._typed_changed()
         self.last_answer = ""
         self.copybtn.setHidden_(True)
 
@@ -1325,6 +1382,147 @@ class Controller(NSObject):
         self.appendText_(out + "\n")
         self.answering = False
 
+    # ---- `% ... #path` prediction (PERCENT_SUGGEST_COMMAND)
+    #
+    # While a `% ` line holding a `#` is typed, the suggest command is asked (after
+    # SUGGEST_DELAY of no typing) what the line would do. It takes the line (the
+    # `% ` removed) as its last argument and prints one JSON line:
+    #   {"mode": "add" | "remind" | "file", "day": "Mon 11-09" or null, "title": ...,
+    #    "place": null, or for a `#` path {"state": "ok" | "many" | "missing" | "deep" | "empty",
+    #      "path": "A › B", "partial": the last path part as typed,
+    #      "suggest": [names the partial starts], "close": true when it starts none and
+    #      "suggest" holds the closest names instead (a typo)}}
+    # The first suggested name shows greyed after the cursor; ` takes it (plus a /),
+    # ↑ / ↓ offer the others, and a hint line under the bar says what Enter will do.
+
+    @objc.python_method
+    def _typed_changed(self):
+        """The field's text changed: drop any answer for older text, ask again after a pause."""
+        self.suggest_seq += 1
+        seq, line = self.suggest_seq, self.input.stringValue()
+        self.ghost.setHidden_(True)
+        if not (PERCENT_SUGGEST_COMMAND and line.startswith("% ") and "#" in line):
+            self.typed = None
+            self._show_hint()
+            return
+        AppHelper.callLater(SUGGEST_DELAY, self._ask_suggest, seq, line)
+
+    @objc.python_method
+    def _ask_suggest(self, seq, line):
+        if seq != self.suggest_seq:
+            return   # typed on since: a newer ask is pending
+        session = self.session
+
+        def worker():
+            data = None
+            try:
+                r = subprocess.run(shlex.split(PERCENT_SUGGEST_COMMAND) + [line[2:].strip()],
+                                   capture_output=True, text=True, timeout=5)
+                if r.returncode == 0:
+                    data = json.loads(r.stdout.strip().splitlines()[0])
+            except Exception:  # no hint is better than a stuck or crashed panel
+                data = None
+            self._on_main(session, self._got_suggest, seq, line, data)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @objc.python_method
+    def _got_suggest(self, seq, line, data):
+        if seq != self.suggest_seq or self.input.stringValue() != line:
+            return   # an answer for text no longer in the field
+        place = data.get("place") if isinstance(data, dict) else None
+        ok = (data.get("mode") == "file" and isinstance(place, dict)
+              and isinstance(place.get("suggest", []), list)) if place else False
+        self.typed = dict(data, q=line) if ok else None
+        self.choice = 0
+        self._show_hint()
+
+    @objc.python_method
+    def _current_hint(self):
+        """The suggest answer, only while it is for the text now in the field."""
+        if self.typed and self.typed["q"] == self.input.stringValue():
+            return self.typed
+        return None
+
+    @objc.python_method
+    def _suggestion(self):
+        names = (self.typed or {}).get("place", {}).get("suggest") or []
+        return names[self.choice % len(names)] if names else None
+
+    @objc.python_method
+    def _show_hint(self):
+        """Fill (or clear) the hint line and the greyed rest of the predicted name."""
+        t = self._current_hint() if self.typed else None
+        if not t:
+            self.ghost.setHidden_(True)
+            if self.typed is None:   # typed on with a hint up: keep it until the new answer
+                self.tip.setHidden_(True)
+                self._set_tip_h(0)
+            return
+        p, day, name = t["place"], t.get("day"), self._suggestion()
+        names = p.get("suggest") or []
+        more = ""
+        if name and not day:
+            more = (" · did you mean “%s”? ` takes it" % name if p.get("close")
+                    else " · ` takes “%s”" % name)
+            if len(names) > 1:
+                more += " (%d of %d, ↑/↓)" % (self.choice % len(names) + 1, len(names))
+        state, path = p.get("state"), p.get("path") or ""
+        if state == "ok":
+            tip = "→ %s · Enter files it there, on today%s" % (path, " · ⏰ " + day if day else "")
+        elif state == "missing":
+            tip = "%s is not made yet · Enter adds the line to Adhoc as typed" % path
+        elif state == "many":
+            tip = "“%s” starts more than one name: type more" % p.get("partial", "")
+        elif state == "deep":
+            tip = "%s goes past 6 levels: file it higher up" % path
+        else:
+            tip = "Type an Area’s name after the #"
+        self.tip.setStringValue_(tip + more)
+        self.tip.setHidden_(False)
+        self._set_tip_h(TIP_H)
+
+        # The greyed rest: only for a name the typed part starts, with the cursor at the end.
+        line, partial = t["q"], p.get("partial") or ""
+        editor = self.input.currentEditor()
+        at_end = editor is None or (
+            editor.selectedRange().length == 0
+            and editor.selectedRange().location == len(line.encode("utf-16-le")) // 2)
+        rest = (name[len(partial):] if name and not p.get("close") and not day
+                and line.endswith(partial) and at_end else "")
+        if not rest:
+            self.ghost.setHidden_(True)
+            return
+        font = {NSFontAttributeName: self.input.font()}
+        typed_w = NSAttributedString.alloc().initWithString_attributes_(line, font).size().width
+        rest_w = NSAttributedString.alloc().initWithString_attributes_(rest, font).size().width + 8
+        if typed_w + rest_w > self.input.frame().size.width:
+            self.ghost.setHidden_(True)   # the line has scrolled: nowhere true to draw it
+            return
+        f = self.input.frame()
+        self.ghost.setStringValue_(rest)
+        self.ghost.setFrame_(NSMakeRect(f.origin.x + typed_w, f.origin.y, rest_w, f.size.height))
+        self.ghost.setHidden_(False)
+
+    @objc.python_method
+    def _take_suggestion(self):
+        """`: the offered name replaces the path's last part, then a /. False = nothing to take."""
+        t, name = self._current_hint(), self._suggestion()
+        if not t or not name or t.get("day"):
+            return False
+        line = t["q"]
+        at = line.rfind("#")
+        path = line[at + 1:]
+        self.input.setStringValue_(line[:at + 1] + path[:path.rfind("/") + 1] + name + "/")
+        editor = self.input.currentEditor()
+        if editor is not None:
+            editor.setSelectedRange_((len(self.input.stringValue().encode("utf-16-le")) // 2, 0))
+        self._typed_changed()
+        return True
+
+    def controlTextDidChange_(self, notification):
+        self._typed_changed()
+
     @objc.python_method
     def _quota_footer(self, stats, search):
         """A one-line quota readout appended (in italic) after each answer.
@@ -1435,6 +1633,13 @@ class Controller(NSObject):
         if event.keyCode() == ESCAPE_KEYCODE:
             self.hide()
             return None
+        # ` takes the predicted name of a `% ... #path` line (else it types a `).
+        if (
+            event.characters() == "`"
+            and not (event.modifierFlags() & NSEventModifierFlagCommand)
+            and self._take_suggestion()
+        ):
+            return None
         # ⌘↩ on a typed line asks it, then copies the answer and closes once it's done.
         if (
             event.keyCode() in RETURN_KEYCODES
@@ -1485,6 +1690,12 @@ class Controller(NSObject):
         if sel == "insertNewline:":
             self.submit()
             return True
+        t = self._current_hint()
+        if sel in ("moveUp:", "moveDown:") and t and len(t["place"].get("suggest") or []) > 1:
+            # a `#` hint with several names: ↑ / ↓ offer the others, ahead of recall
+            self.choice += -1 if sel == "moveUp:" else 1
+            self._show_hint()
+            return True
         if sel in ("moveUp:", "moveDown:") and self.recall:
             # ↑ / ↓ step through the lines asked since launch; past the newest, a blank field.
             at = len(self.recall) if self.recall_at is None else self.recall_at
@@ -1498,6 +1709,7 @@ class Controller(NSObject):
             editor = self.input.currentEditor()
             if editor is not None:
                 editor.setSelectedRange_((len(self.input.stringValue()), 0))
+            self._typed_changed()
             return True
         return False
 
