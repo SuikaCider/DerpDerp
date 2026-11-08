@@ -153,9 +153,12 @@ After opening DerpDerp, type `capital of france` or something and then hit `Ente
 - **Open** → Double-tap Right ⌘ to open DerpDerp 
 - **Add modifiers** → Preface your query with your desired modifiers (section 12), if necessary
 - **Query** → Enter your short simple question and press return
-- **Copy** → Press ⌘C (with nothing selected) to copy DerpDerp's whole answer to the clipboard, or click the **⧉** button in the top-right corner of the answer.
-- **Query again** → You can keep asking. While DerpDerp stays open it remembers the conversation, so follow-up questions build on the previous answer just fine. Upon closing the panel, its little derp brain is purged. Every new session starts from scratch and conversations don't carry over.
-- **Close** → Double-tap Right ⌘ while DerpDerp is open to close it
+- **Copy** → Press ⌘C (with nothing selected) to copy DerpDerp's whole answer to the clipboard, or click the **⧉** button in the top-right corner of the answer. Or press ⌘↩ instead of return: DerpDerp answers, copies the answer, and closes itself. With the box empty, ⌘↩ copies the answer on screen and closes.
+- **Query again** → You can keep asking. While DerpDerp stays open it remembers the conversation, so follow-up questions build on the previous answer just fine. Close the panel and reopen it within 5 minutes, and your answer and the conversation are still there (`KEEP_ANSWER_MINUTES` in your settings file changes the 5). After that, its little derp brain is purged and the next session starts from scratch.
+- **Ask it again** → Press ↑ in the box to bring back a question you asked earlier (↓ goes forward again).
+- **Look back** → Type `/history` to see your last 10 questions and answers, even ones from earlier days.
+- **Edit** → ⌘A, ⌘C, ⌘V and ⌘X work in the box like anywhere else.
+- **Close** → Double-tap Right ⌘ while DerpDerp is open, or press Esc.
 
 If you get it all set up and then forget what to do, just type `/help` to see how to format your queries.
 
