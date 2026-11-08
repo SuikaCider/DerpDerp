@@ -19,6 +19,7 @@ DerpDerp/
 ├── .gitignore                    ← junk for git to ignore
 ├── LICENSE                       ← MIT — do as you wish
 ├── README.md                     ← setup guide (start here)
+├── assets/                       ← the screenshot in this README
 ├── derpderp.py                   ← the whole tool
 └── troubleshooting/              ← for when it breaks
     ├── README.md                 ← what to do when stuck

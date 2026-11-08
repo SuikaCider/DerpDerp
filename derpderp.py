@@ -13,7 +13,7 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \w \\w    add a Wiktionary lookup (meanings, IPA, etymology)
     \d \\d    direct: a bare, paste-ready plaintext answer, copied for you
     \c \\c    copy the answer to the clipboard when it's done
-    \p \\p    send your clipboard along with the question
+    \p \\p    send what you copied (⌘C) along with the question you type
     %         hand the line to your own command (optional: PERCENT_COMMAND in CONFIG)
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the last answer and closes, /history shows the last 10 answers.
@@ -273,7 +273,8 @@ HELP = (
         "`w`\tAdd Wiktionary (meanings, IPA, etymology)",
         "`d`\tDirect plaintext answer; copies itself to your clipboard",
         "`c`\tCopy the answer to your clipboard when it's done",
-        "`p`\tSend your clipboard along with the question",
+        "`p`\tSend what you copied (⌘C) along with the question you type",
+        "",
         "\tCombine them in any order: `\\wc ipa of prendre`",
     )),
     ("SHORTCUTS", "", (
@@ -1108,7 +1109,16 @@ class Controller(NSObject):
                 question = question[end:]
         question = question.strip()
         if not question:
+            if flags:   # flags typed with no question after them: say so, never silently ignore
+                self._hint("Type a query; your clipboard will be pasted alongside it"
+                           if "p" in flags else "Type a question after the flags")
             return
+        clip = ""
+        if "p" in flags:
+            clip = (NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString) or "").strip()
+            if not clip:
+                self._hint("Clipboard has no text — copy something first (⌘C)")
+                return
         direct = "d" in flags
         copy_when_done = direct or "c" in flags
 
@@ -1125,13 +1135,9 @@ class Controller(NSObject):
 
         # `p`: the clipboard rides along with the question (searches use the question alone).
         ask_text, echo = question, question
-        if "p" in flags:
-            clip = (NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString) or "").strip()
-            if clip:
-                ask_text = "%s\n\nClipboard:\n%s" % (question, clip[:3000])
-                echo = "%s  (+ clipboard)" % question
-            else:
-                echo = "%s  (clipboard has no text)" % question
+        if clip:
+            ask_text = "%s\n\nClipboard:\n%s" % (question, clip[:3000])
+            echo = "%s  (+ clipboard)" % question
 
         self._begin()
         session = self.session
@@ -1356,6 +1362,13 @@ class Controller(NSObject):
         self._grow()
         self.answer.textStorage().setAttributedString_(help_attributed())
         self.answer.scrollRangeToVisible_((0, 0))
+
+    @objc.python_method
+    def _hint(self, text):
+        """A one-line note in the panel; the typed line stays in the field to finish."""
+        prefix = "\n\n" if self.answer.string() else ""
+        self._grow()
+        self.appendText_(prefix + text)
 
     def appendText_(self, text):
         storage = self.answer.textStorage()
