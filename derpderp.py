@@ -16,7 +16,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \p \\p    send what you copied (⌘C) along with the question you type
     %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py);
               with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it;
-              PERCENT_SUGGEST_URL asks a running app for the same answer first (faster)
+              PERCENT_SUGGEST_URL asks a running app for the same answer first (faster);
+              with PERCENT_MAKE_COMMAND set, Enter on a path not made yet asks "Make it? Y / N"
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers.
@@ -120,11 +121,12 @@ KEEP_ANSWER_MINUTES = 5
 PERCENT_COMMAND = ""
 PERCENT_SUGGEST_COMMAND = ""
 PERCENT_SUGGEST_URL = ""
+PERCENT_MAKE_COMMAND = ""
 SETTING_NAMES = (
     "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
     "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
     "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
-    "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL",
+    "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL", "PERCENT_MAKE_COMMAND",
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "derpderp_config.py")
@@ -192,6 +194,7 @@ GEMINI_API_KEY = load_secret("GEMINI_POPUPSEARCH") or GEMINI_API_KEY
 PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
 PERCENT_SUGGEST_COMMAND = load_secret("DERPDERP_PERCENT_SUGGEST_COMMAND") or PERCENT_SUGGEST_COMMAND
 PERCENT_SUGGEST_URL = load_secret("DERPDERP_PERCENT_SUGGEST_URL") or PERCENT_SUGGEST_URL
+PERCENT_MAKE_COMMAND = load_secret("DERPDERP_PERCENT_MAKE_COMMAND") or PERCENT_MAKE_COMMAND
 
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
@@ -893,6 +896,8 @@ class Controller(NSObject):
         self.typed = None         # the suggest command's answer for the `% ` line in the field
         self.choice = 0           # which of its suggested names is offered (↑ / ↓)
         self.suggest_seq = 0      # bumped on every edit: an answer for older text is dropped
+        self.asking = False       # "Make it? Y / N" is up for the line in the field
+        self.enter_waits = None   # Enter came before that line's hint: decide when it arrives
         self.tip_h = 0            # TIP_H while the hint line shows, else 0
         self._build()
         return self
@@ -1076,6 +1081,7 @@ class Controller(NSObject):
         self.recall_at = None
         self.close_when_done = False
         self.typed = None
+        self.asking, self.enter_waits = False, None
         self.tip_h = 0
         self.tip.setHidden_(True)
         self.ghost.setHidden_(True)
@@ -1143,9 +1149,17 @@ class Controller(NSObject):
             self._show_history()
             return
 
-        # `% ` — hand the line to PERCENT_COMMAND; no LLM.
+        # `% ` — hand the line to PERCENT_COMMAND; no LLM. A `#` path not made yet asks first.
         if question.startswith("% "):
-            self._run_percent(question[2:].strip())
+            line = self.input.stringValue()
+            if (PERCENT_MAKE_COMMAND and "#" in line and (PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND)
+                    and not self._current_hint()):
+                if self.enter_waits != line:   # its hint isn't here yet: ask now, decide on the answer
+                    self.enter_waits = line
+                    self.suggest_seq += 1
+                    self._ask_suggest(self.suggest_seq, line)
+                return
+            self._percent_enter(line)
             return
 
         # Parse leading modifiers. A backslash is the "command" marker:
@@ -1354,8 +1368,20 @@ class Controller(NSObject):
         self.answer.scrollRangeToVisible_((storage.length(), 0))
 
     @objc.python_method
-    def _run_percent(self, line):
-        """Run PERCENT_COMMAND with `line` as its last argument and show what it printed."""
+    def _percent_enter(self, line):
+        """Enter on a `% ` line: a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND), else run it."""
+        t = self._current_hint()
+        if PERCENT_MAKE_COMMAND and t and t["place"].get("state") == "missing":
+            self.asking = True
+            self._show_hint()
+            return
+        self._run_percent(line[2:].strip())
+
+    @objc.python_method
+    def _run_percent(self, line, make=False):
+        """Run PERCENT_COMMAND (PERCENT_MAKE_COMMAND for a Y) with `line` as its last argument and show
+        what it printed."""
+        command = PERCENT_MAKE_COMMAND if make else PERCENT_COMMAND
         if not line:
             return
         self._begin()
@@ -1367,10 +1393,10 @@ class Controller(NSObject):
         def worker():
             out = "% command failed"
             try:
-                if not PERCENT_COMMAND:
+                if not command:
                     out = "% lines are off: set PERCENT_COMMAND in derpderp_config.py."
                 else:
-                    r = subprocess.run(shlex.split(PERCENT_COMMAND) + [line],
+                    r = subprocess.run(shlex.split(command) + [line],
                                        capture_output=True, text=True, timeout=20)
                     out = (r.stdout if r.returncode == 0 else r.stderr or r.stdout).strip()
                     out = out or ("done" if r.returncode == 0 else "failed (exit %d)" % r.returncode)
@@ -1401,10 +1427,15 @@ class Controller(NSObject):
     # With PERCENT_SUGGEST_URL set, a GET of that URL with ?q=<the same line> is tried first
     # (a running app answers in well under the command's start-up time); no answer within
     # SUGGEST_URL_TIMEOUT, or no JSON, and the command is asked as before.
+    # With PERCENT_MAKE_COMMAND set, Enter on a "missing" path asks "Make it? Y / N": Y runs
+    # that command with the line (it makes place.make's names, then files the line there), N runs
+    # PERCENT_COMMAND as for any line, any other key drops the question. Enter typed before the
+    # line's answer came asks at once and decides when it arrives.
 
     @objc.python_method
     def _typed_changed(self):
         """The field's text changed: drop any answer for older text, ask again after a pause."""
+        self.asking, self.enter_waits = False, None
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
@@ -1453,6 +1484,9 @@ class Controller(NSObject):
         self.typed = dict(data, q=line) if ok else None
         self.choice = 0
         self._show_hint()
+        if self.enter_waits == line:   # Enter was pressed before this answer: act on it now
+            self.enter_waits = None
+            self._percent_enter(line)
 
     @objc.python_method
     def _current_hint(self):
@@ -1479,7 +1513,7 @@ class Controller(NSObject):
         p, day, name = t["place"], t.get("day"), self._suggestion()
         names = p.get("suggest") or []
         more = ""
-        if name and not day:
+        if name and not day and not self.asking:
             more = (" · did you mean “%s”? ` takes it" % name if p.get("close")
                     else " · ` takes “%s”" % name)
             if len(names) > 1:
@@ -1487,6 +1521,10 @@ class Controller(NSObject):
         state, path = p.get("state"), p.get("path") or ""
         if state == "ok":
             tip = "→ %s · Enter files it there, on today%s" % (path, " · ⏰ " + day if day else "")
+        elif state == "missing" and self.asking:
+            tip = "%s is not made yet. Make it? Y / N · N adds the line to Adhoc as typed" % path
+        elif state == "missing" and PERCENT_MAKE_COMMAND:
+            tip = "%s is not made yet · Enter asks to make it" % path
         elif state == "missing":
             tip = "%s is not made yet · Enter adds the line to Adhoc as typed" % path
         elif state == "many":
@@ -1505,7 +1543,7 @@ class Controller(NSObject):
         at_end = editor is None or (
             editor.selectedRange().length == 0
             and editor.selectedRange().location == len(line.encode("utf-16-le")) // 2)
-        rest = (name[len(partial):] if name and not p.get("close") and not day
+        rest = (name[len(partial):] if name and not p.get("close") and not day and not self.asking
                 and line.endswith(partial) and at_end else "")
         if not rest:
             self.ghost.setHidden_(True)
@@ -1650,6 +1688,18 @@ class Controller(NSObject):
         if event.keyCode() == ESCAPE_KEYCODE:
             self.hide()
             return None
+        # "Make it? Y / N" is up: Y makes the path and files the line, N runs it as typed, any
+        # other key (Enter aside, which keeps asking) drops the question and does its usual thing.
+        if self.asking and not (event.modifierFlags() & NSEventModifierFlagCommand):
+            k = (event.charactersIgnoringModifiers() or "").lower()
+            if k in ("y", "n") and self._current_hint():
+                line = self.input.stringValue()
+                self.asking = False
+                self._run_percent(line[2:].strip(), make=(k == "y"))
+                return None
+            if event.keyCode() not in RETURN_KEYCODES:
+                self.asking = False
+                self._show_hint()
         # ` takes the predicted name of a `% ... #path` line (else it types a `).
         if (
             event.characters() == "`"

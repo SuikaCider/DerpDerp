@@ -67,3 +67,11 @@ PERCENT_SUGGEST_COMMAND = ""
 #   PERCENT_SUGGEST_URL = "http://127.0.0.1:5001/today/typed"
 # A DERPDERP_PERCENT_SUGGEST_URL environment variable (or ~/.secrets line) wins.
 PERCENT_SUGGEST_URL = ""
+
+# Optional, with a suggest setting above: Enter on a `#` path the answer calls
+# "missing" asks "Make it? Y / N". Y runs this command with the line as its
+# last argument (it should make the path, then file the line there); N runs
+# PERCENT_COMMAND as usual. Blank = no question: Enter runs PERCENT_COMMAND. Example:
+#   PERCENT_MAKE_COMMAND = "python3 /path/to/add_note.py --make"
+# A DERPDERP_PERCENT_MAKE_COMMAND environment variable (or ~/.secrets line) wins.
+PERCENT_MAKE_COMMAND = ""
