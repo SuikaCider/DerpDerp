@@ -249,6 +249,8 @@ ANSWER_H = 380
 SIDE = 16          # horizontal inset shared by input, separator and answer text
 PLACEHOLDER_DROP = -4.0   # points the placeholder sits lower than its natural spot
 TIP_H = 22         # the hint line under the bar, shown only while a `% ... #path` hint is up
+TIP_LINE = 15      # what a second hint line adds (a long hint wraps to 2 lines, then truncates)
+BAR_MAX = INPUT_H + ANSWER_H - 120   # the tallest the question bar grows for a wrapped line
 SUGGEST_DELAY = 0.25   # seconds of no typing before the suggest command is asked
 SUGGEST_URL_TIMEOUT = 1.0   # seconds PERCENT_SUGGEST_URL gets to answer before the command is asked
 
@@ -903,6 +905,7 @@ class Controller(NSObject):
         self.asking = False       # "Make it? Y / N" is up for the line in the field
         self.enter_waits = None   # Enter came before that line's hint: decide when it arrives
         self.tip_h = 0            # TIP_H while the hint line shows, else 0
+        self.bar_h = INPUT_H      # the question bar's height: taller while a long line wraps
         self._build()
         return self
 
@@ -977,7 +980,9 @@ class Controller(NSObject):
         self.tip = NSTextField.labelWithString_("")
         self.tip.setFont_(NSFont.systemFontOfSize_(12))
         self.tip.setTextColor_(NSColor.secondaryLabelColor())
-        self.tip.setLineBreakMode_(4)  # NSLineBreakByTruncatingTail
+        self.tip.setLineBreakMode_(0)  # NSLineBreakByWordWrapping: up to 2 lines, then …
+        self.tip.setMaximumNumberOfLines_(2)
+        self.tip.cell().setTruncatesLastVisibleLine_(True)
         self.tip.setFrame_(NSMakeRect(SIDE, 0, PANEL_W - 2 * SIDE, 16))
         blur.addSubview_(self.tip)
         self.tip.setHidden_(True)
@@ -1046,13 +1051,14 @@ class Controller(NSObject):
 
     @objc.python_method
     def _layout(self, height):
-        # Question bar occupies the top INPUT_H of the panel; the field is
-        # centered within it, the hint line (if up) sits under it, and the
-        # answer fills everything below.
-        bar_bottom = height - INPUT_H
+        # Question bar occupies the top bar_h of the panel (INPUT_H, taller while a long line
+        # wraps); the field is centered within it, the hint line (if up) sits under it, and
+        # the answer fills everything below.
+        bar_bottom = height - self.bar_h
         answer_top = bar_bottom - self.tip_h
-        field_y = bar_bottom + (INPUT_H - FIELD_H) / 2.0
-        self.input.setFrameOrigin_((SIDE, field_y))
+        field_h = FIELD_H + self.bar_h - INPUT_H
+        field_y = bar_bottom + (self.bar_h - field_h) / 2.0
+        self.input.setFrame_(NSMakeRect(SIDE, field_y, PANEL_W - 2 * SIDE, field_h))
         self.ghost.setFrameOrigin_((self.ghost.frame().origin.x, field_y))
         self.tip.setFrameOrigin_((SIDE, answer_top + 4))
         self.separator.setFrameOrigin_((SIDE, answer_top))
@@ -1073,6 +1079,28 @@ class Controller(NSObject):
         self._layout(height)
 
     @objc.python_method
+    def _fit_bar(self):
+        """Grow (or shrink) the question bar to show every line the typed text wraps to, up to
+        BAR_MAX, the panel's top edge staying put. With an answer up, the answer gives the room."""
+        font = {NSFontAttributeName: self.input.font()}
+        width = PANEL_W - 2 * SIDE - 10   # the field's own text inset
+
+        def tall(text):
+            return NSAttributedString.alloc().initWithString_attributes_(text, font) \
+                .boundingRectWithSize_options_context_((width, 1e4), 1, None).size.height
+        extra = max(0.0, tall(self.input.stringValue() or "X") - tall("X"))
+        bar_h = min(BAR_MAX, INPUT_H + round(extra))
+        if bar_h == self.bar_h:
+            return
+        f = self.panel.frame()
+        height = f.size.height if not self.scroll.isHidden() else f.size.height - self.bar_h + bar_h
+        self.bar_h = bar_h
+        self.panel.setFrame_display_animate_(
+            NSMakeRect(f.origin.x, f.origin.y + f.size.height - height, PANEL_W, height), True, False
+        )
+        self._layout(height)
+
+    @objc.python_method
     def _grow(self):
         if self.scroll.isHidden():
             self.scroll.setHidden_(False)
@@ -1087,6 +1115,7 @@ class Controller(NSObject):
         self.typed = None
         self.asking, self.enter_waits = False, None
         self.tip_h = 0
+        self.bar_h = INPUT_H
         self.tip.setHidden_(True)
         self.ghost.setHidden_(True)
         # Reopened soon after closing, with nothing still running: the last answer
@@ -1458,6 +1487,7 @@ class Controller(NSObject):
     @objc.python_method
     def _typed_changed(self):
         """The field's text changed: drop any answer for older text, ask again after a pause."""
+        self._fit_bar()
         self.asking, self.enter_waits = False, None
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
@@ -1546,9 +1576,14 @@ class Controller(NSObject):
 
     @objc.python_method
     def _show_tip(self, tip):
+        """Show the hint line: one line, or two (TIP_LINE taller) when it is too long for one."""
+        width = PANEL_W - 2 * SIDE
+        long = NSAttributedString.alloc().initWithString_attributes_(
+            tip, {NSFontAttributeName: self.tip.font()}).size().width > width - 4
         self.tip.setStringValue_(tip)
+        self.tip.setFrameSize_((width, 16 + (TIP_LINE if long else 0)))
         self.tip.setHidden_(False)
-        self._set_tip_h(TIP_H)
+        self._set_tip_h(TIP_H + (TIP_LINE if long else 0))
 
     @objc.python_method
     def _draw_ghost(self, line, rest):
@@ -1612,9 +1647,7 @@ class Controller(NSObject):
             tip = ("⏰ Inbox %s · Enter files it in Inbox with this reminder" % day if t["mode"] == "remind"
                    else "＋ Adhoc · Enter adds it to Adhoc")
             self.ghost.setHidden_(True)
-            self.tip.setStringValue_(tip)
-            self.tip.setHidden_(False)
-            self._set_tip_h(TIP_H)
+            self._show_tip(tip)
             return
         names = p.get("suggest") or []
         more = ""
