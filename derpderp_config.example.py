@@ -60,3 +60,10 @@ PERCENT_COMMAND = ""
 #   PERCENT_SUGGEST_COMMAND = "python3 /path/to/add_note.py --suggest"
 # A DERPDERP_PERCENT_SUGGEST_COMMAND environment variable (or ~/.secrets line) wins.
 PERCENT_SUGGEST_COMMAND = ""
+
+# Optional, faster: a running app's web address that gives the same JSON for
+# ?q=<the line>. It is asked first; when it doesn't answer within a second,
+# PERCENT_SUGGEST_COMMAND is asked instead. Example:
+#   PERCENT_SUGGEST_URL = "http://127.0.0.1:5001/today/typed"
+# A DERPDERP_PERCENT_SUGGEST_URL environment variable (or ~/.secrets line) wins.
+PERCENT_SUGGEST_URL = ""

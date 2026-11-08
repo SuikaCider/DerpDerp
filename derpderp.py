@@ -15,7 +15,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     \c \\c    copy the answer to the clipboard when it's done
     \p \\p    send what you copied (⌘C) along with the question you type
     %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py);
-              with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it
+              with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it;
+              PERCENT_SUGGEST_URL asks a running app for the same answer first (faster)
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers.
@@ -118,11 +119,12 @@ HISTORY_FILE = os.path.expanduser("~/.cache/derpderp_history.txt")
 KEEP_ANSWER_MINUTES = 5
 PERCENT_COMMAND = ""
 PERCENT_SUGGEST_COMMAND = ""
+PERCENT_SUGGEST_URL = ""
 SETTING_NAMES = (
     "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
     "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
     "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
-    "PERCENT_SUGGEST_COMMAND",
+    "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL",
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "derpderp_config.py")
@@ -189,6 +191,7 @@ TAVILY_API_KEY = load_secret("TAVILY_POPUPSEARCH") or TAVILY_API_KEY
 GEMINI_API_KEY = load_secret("GEMINI_POPUPSEARCH") or GEMINI_API_KEY
 PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
 PERCENT_SUGGEST_COMMAND = load_secret("DERPDERP_PERCENT_SUGGEST_COMMAND") or PERCENT_SUGGEST_COMMAND
+PERCENT_SUGGEST_URL = load_secret("DERPDERP_PERCENT_SUGGEST_URL") or PERCENT_SUGGEST_URL
 
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
@@ -242,6 +245,7 @@ SIDE = 16          # horizontal inset shared by input, separator and answer text
 PLACEHOLDER_DROP = -4.0   # points the placeholder sits lower than its natural spot
 TIP_H = 22         # the hint line under the bar, shown only while a `% ... #path` hint is up
 SUGGEST_DELAY = 0.25   # seconds of no typing before the suggest command is asked
+SUGGEST_URL_TIMEOUT = 1.0   # seconds PERCENT_SUGGEST_URL gets to answer before the command is asked
 
 SYSTEM = (
     "You are a Spotlight-style quick answer overlay. "
@@ -1382,7 +1386,7 @@ class Controller(NSObject):
         self.appendText_(out + "\n")
         self.answering = False
 
-    # ---- `% ... #path` prediction (PERCENT_SUGGEST_COMMAND)
+    # ---- `% ... #path` prediction (PERCENT_SUGGEST_URL, else PERCENT_SUGGEST_COMMAND)
     #
     # While a `% ` line holding a `#` is typed, the suggest command is asked (after
     # SUGGEST_DELAY of no typing) what the line would do. It takes the line (the
@@ -1394,6 +1398,9 @@ class Controller(NSObject):
     #      "suggest" holds the closest names instead (a typo)}}
     # The first suggested name shows greyed after the cursor; ` takes it (plus a /),
     # ↑ / ↓ offer the others, and a hint line under the bar says what Enter will do.
+    # With PERCENT_SUGGEST_URL set, a GET of that URL with ?q=<the same line> is tried first
+    # (a running app answers in well under the command's start-up time); no answer within
+    # SUGGEST_URL_TIMEOUT, or no JSON, and the command is asked as before.
 
     @objc.python_method
     def _typed_changed(self):
@@ -1401,7 +1408,7 @@ class Controller(NSObject):
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
-        if not (PERCENT_SUGGEST_COMMAND and line.startswith("% ") and "#" in line):
+        if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and line.startswith("% ") and "#" in line):
             self.typed = None
             self._show_hint()
             return
@@ -1414,14 +1421,24 @@ class Controller(NSObject):
         session = self.session
 
         def worker():
-            data = None
-            try:
-                r = subprocess.run(shlex.split(PERCENT_SUGGEST_COMMAND) + [line[2:].strip()],
-                                   capture_output=True, text=True, timeout=5)
-                if r.returncode == 0:
-                    data = json.loads(r.stdout.strip().splitlines()[0])
-            except Exception:  # no hint is better than a stuck or crashed panel
-                data = None
+            q, data = line[2:].strip(), None
+            if PERCENT_SUGGEST_URL:
+                try:
+                    url = "%s%s%s" % (PERCENT_SUGGEST_URL, "&" if "?" in PERCENT_SUGGEST_URL else "?",
+                                      urllib.parse.urlencode({"q": q}))
+                    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with no_proxy.open(url, timeout=SUGGEST_URL_TIMEOUT) as r:
+                        data = json.loads(r.read().decode("utf-8"))
+                except Exception:  # not running, too slow, or not JSON: ask the command
+                    data = None
+            if data is None and PERCENT_SUGGEST_COMMAND:
+                try:
+                    r = subprocess.run(shlex.split(PERCENT_SUGGEST_COMMAND) + [q],
+                                       capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0:
+                        data = json.loads(r.stdout.strip().splitlines()[0])
+                except Exception:  # no hint is better than a stuck or crashed panel
+                    data = None
             self._on_main(session, self._got_suggest, seq, line, data)
 
         threading.Thread(target=worker, daemon=True).start()
