@@ -250,10 +250,13 @@ DerpDerp is an LLM wrapper. It answers your questions by giving an LLM (Groq/Gem
 The **search layer**, if invoked, appends additional context to your query to help the LLM respond.
 - **[Wikipedia](https://en.wikipedia.org/w/api.php)** → A free, open API. DerpDerp calls it over `urllib` (idk what that is), opens the top 3 most-relevant entries, and fetches their introductions.
 - **[Tavily](https://www.tavily.com/)** → A freemium API. You get 1,000 monthly queries for free. If invoked, Tavili will search for your query and (somehow) feed the answer into your LLM. I think. 
+- **[Wiktionary](https://en.wiktionary.org/w/api.php)** → Also free and open. With the `w` flag, DerpDerp finds which words in your question have a Wiktionary entry and hands the LLM up to two of them (meanings, IPA, etymology). Wikipedia rarely has those for an ordinary word.
+
+Whenever a search runs, the pages it used show up as clickable **Sources** links under the answer.
 
 The **LLM layer** is where your query and any additional context is handed to an LLM.
 - **[Groq](https://console.groq.com/)** → Connects you to small LLM models; if you're using DerpDerp for small, simple queries, as intended, you'll never hit its daily rate limit
-- **[Gemini](https://aistudio.google.com/)** → Mostly here because my initial goal was to find a way to ping Gemini without yeeting it into godknowswhere in MacOS's desktop switcher, minimizing it, or hiding it. Terrible things happened when I used Gemini's builtin command to open a "mini chat". I don't know if it's Apple's fault or Google's, but it was horrible. Shudder for me. Anyway—Gemini only actually runs if you choose to skip the Groq key entirely by prefacing your query with `\\`.
+- **[Gemini](https://aistudio.google.com/)** → Mostly here because my initial goal was to find a way to ping Gemini without yeeting it into godknowswhere in MacOS's desktop switcher, minimizing it, or hiding it. Terrible things happened when I used Gemini's builtin command to open a "mini chat". I don't know if it's Apple's fault or Google's, but it was horrible. Shudder for me. Anyway—Gemini only actually runs if you preface your query with `\\`, or on its own when Groq is still rate limiting after a retry.
 
 You can preface your question with [modifiers](#12-the-modifiers) to mix and match these services. 
 
@@ -373,8 +376,8 @@ For the few straightforward things I expect to go wrong, here's a cheatsheet:
 | Symptom | Likely cause & fix |
 |---|---|
 | **Double-tap does nothing** | Input Monitoring not granted → System Settings → Privacy & Security → Input Monitoring → enable Python, then re-run/reload. |
-| **`[HTTP 404] model … does not exist`** | Your account can't access `GROQ_MODEL`/`GEMINI_MODEL` → change it in CONFIG to one your key has. |
-| **`[HTTP 429]` / quota reached** | You hit a rate/day limit. Groq's per-minute token bucket refills in ~a minute (just wait a moment); Gemini's daily cap resets tomorrow. DerpDerp retries once, then reports the error — it does **not** auto-switch engines, so wait it out or force the other engine yourself (`\\` for Gemini). |
+| **`[HTTP 404] model … does not exist`** | Your account can't access `GROQ_MODEL`/`GEMINI_MODEL` → change it in your settings file (`derpderp_config.py`) to one your key has. |
+| **`[HTTP 429]` / quota reached** | You hit a rate/day limit. Groq's per-minute token bucket refills in ~a minute (just wait a moment); Gemini's daily cap resets tomorrow. DerpDerp retries once. If Groq still says no and you have a Gemini key, Gemini answers instead (the panel tells you it switched). Without a Gemini key, wait it out. |
 | **Panel stopped appearing after an edit** | Python error on launch → `tail ~/Library/Logs/derpderp.log` for the traceback. |
 | **Answers seem doubled / hotkey acts twice** | Two instances running → the single-instance lock should prevent this; make sure you're not running it manually *and* via the LaunchAgent. |
 
