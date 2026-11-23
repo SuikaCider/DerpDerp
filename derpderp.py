@@ -301,6 +301,9 @@ HELP = (
         "`%`\tLog an item into To Derp's inbox",
         "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
+        "\tAfter `|` on a `#` line → a note for the item (i.e., a link)",
+        "\tEnd a `#` line with `$wip`, `$next`, `$waiting` or `$done` → its status",
+        "\tAdd `*pin` to a `#` line → pins the item",
         "\tAfter a `#` or `@`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
         "`$`\tSet an item's status: type part of its name, the backtick key takes it,",
         "\tthen `done`, `wip`, `next`, `waiting` or `killed {why}`",
@@ -1894,6 +1897,15 @@ class Controller(NSObject):
             return True
         if sel in ("moveUp:", "moveDown:") and self.recall:
             # ↑ / ↓ step through the lines asked since launch; past the newest, a blank field.
+            # Only from an empty field or an unedited recalled line: any other text is a draft,
+            # and the arrows just move the cursor (before a hint arrives, or with 0 or 1 names).
+            field = self.input.stringValue()
+            browsing = self.recall_at is not None and self.recall_at < len(self.recall) \
+                and field == self.recall[self.recall_at]
+            if field.strip() and not browsing:
+                return False
+            if not browsing:
+                self.recall_at = None
             at = len(self.recall) if self.recall_at is None else self.recall_at
             at = max(0, at - 1) if sel == "moveUp:" else at + 1
             if at >= len(self.recall):
