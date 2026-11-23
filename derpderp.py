@@ -301,7 +301,7 @@ HELP = (
         "`%`\tLog an item into To Derp's inbox",
         "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
         "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
-        "\tAfter `|` on a `#` line → a note for the item (i.e., a link)",
+        "\tAfter `|` on a `#` or `@day` line → a note, e.g. `| [doc](https://…)`",
         "\tEnd a `#` line with `$wip`, `$next`, `$waiting` or `$done` → its status",
         "\tAdd `*pin` to a `#` line → pins the item",
         "\tAfter a `#` or `@`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
