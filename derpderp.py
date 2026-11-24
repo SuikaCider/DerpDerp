@@ -907,6 +907,7 @@ class Controller(NSObject):
         self.suggest_seq = 0      # bumped on every edit: an answer for older text is dropped
         self.asking = False       # "Make it? Y / N" is up for the line in the field
         self.enter_waits = None   # Enter came before that line's hint: decide when it arrives
+        self.in_flight = None     # (seq, line) of the lookup running now, so Enter never asks twice
         self.tip_h = 0            # TIP_H while the hint line shows, else 0
         self.bar_h = INPUT_H      # the question bar's height: taller while a long line wraps
         self._build()
@@ -1116,7 +1117,7 @@ class Controller(NSObject):
         self.recall_at = None
         self.close_when_done = False
         self.typed = None
-        self.asking, self.enter_waits = False, None
+        self.asking, self.enter_waits, self.in_flight = False, None, None
         self.tip_h = 0
         self.bar_h = INPUT_H
         self.tip.setHidden_(True)
@@ -1195,10 +1196,12 @@ class Controller(NSObject):
                 return
             if ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and not self._current_hint()
                     and (dollar or (PERCENT_MAKE_COMMAND and "#" in line))):
-                if self.enter_waits != line:   # its hint isn't here yet: ask now, decide on the answer
+                if self.enter_waits != line:   # its hint isn't here yet: say so, decide on the answer
                     self.enter_waits = line
-                    self.suggest_seq += 1
-                    self._ask_suggest(self.suggest_seq, line)
+                    self.ghost.setHidden_(True)
+                    self._show_tip("Checking item…" if dollar else "Checking destination…")
+                    if self.in_flight != (self.suggest_seq, line):   # else: the lookup running answers it
+                        self._ask_suggest(self.suggest_seq, line)
                 return
             self._percent_enter(line)
             return
@@ -1485,12 +1488,16 @@ class Controller(NSObject):
     # With PERCENT_MAKE_COMMAND set, Enter on a "missing" path asks "Make it? Y / N": Y runs
     # that command with the line (it makes place.make's names, then files the line there), N runs
     # PERCENT_COMMAND as for any line, any other key drops the question. Enter typed before the
-    # line's answer came asks at once and decides when it arrives.
+    # line's answer came shows "Checking destination…" ("Checking item…" on a `$` line) at
+    # once and decides when the answer arrives, using the lookup already running for that line.
 
     @objc.python_method
     def _typed_changed(self):
         """The field's text changed: drop any answer for older text, ask again after a pause."""
         self._fit_bar()
+        if self.enter_waits is not None:   # typed on after Enter: its "Checking…" no longer holds
+            self.tip.setHidden_(True)
+            self._set_tip_h(0)
         self.asking, self.enter_waits = False, None
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
@@ -1504,8 +1511,9 @@ class Controller(NSObject):
 
     @objc.python_method
     def _ask_suggest(self, seq, line):
-        if seq != self.suggest_seq:
-            return   # typed on since: a newer ask is pending
+        if seq != self.suggest_seq or self.in_flight == (seq, line):
+            return   # typed on since (a newer ask is pending), or Enter already asked this one
+        self.in_flight = (seq, line)
         session = self.session
 
         def worker():
@@ -1533,6 +1541,8 @@ class Controller(NSObject):
 
     @objc.python_method
     def _got_suggest(self, seq, line, data):
+        if self.in_flight == (seq, line):
+            self.in_flight = None
         if seq != self.suggest_seq or self.input.stringValue() != line:
             return   # an answer for text no longer in the field
         if isinstance(data, dict):
