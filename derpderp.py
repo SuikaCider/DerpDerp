@@ -22,7 +22,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
               suggest answer offers matching items (` takes one) and says what's missing
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
-shows the last 10 answers.
+shows the last 10 answers. ☆ (⌘S) keeps an answer, or the part of it you selected, as a
+named snippet; the name typed alone copies its text, offline. /snippets lists them.
 
 ──────────────────────────────────────────────────────────────────────────
 SETUP (3 steps)
@@ -120,6 +121,7 @@ DOUBLE_TAP_TIMEOUT = 0.4
 USAGE_FILE = os.path.expanduser("~/.cache/derpderp_usage.json")
 LOCK_FILE  = os.path.expanduser("~/.cache/derpderp.lock")
 HISTORY_FILE = os.path.expanduser("~/.cache/derpderp_history.txt")
+SNIPPETS_FILE = os.path.expanduser("~/Library/Application Support/DerpDerp/snippets.json")
 KEEP_ANSWER_MINUTES = 5
 PERCENT_COMMAND = ""
 PERCENT_SUGGEST_COMMAND = ""
@@ -128,7 +130,7 @@ PERCENT_MAKE_COMMAND = ""
 SETTING_NAMES = (
     "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
     "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
-    "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
+    "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "SNIPPETS_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
     "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL", "PERCENT_MAKE_COMMAND",
 )
 
@@ -152,6 +154,7 @@ load_config(CONFIG_FILE, globals())
 USAGE_FILE = os.path.expanduser(USAGE_FILE)
 LOCK_FILE = os.path.expanduser(LOCK_FILE)
 HISTORY_FILE = os.path.expanduser(HISTORY_FILE)
+SNIPPETS_FILE = os.path.expanduser(SNIPPETS_FILE)
 
 # --- Keys kept outside this file (optional) ---------------------------------
 # If GROQ_POPUPSEARCH / TAVILY_POPUPSEARCH / GEMINI_POPUPSEARCH is set in your
@@ -305,6 +308,8 @@ HELP = (
         "`↑`\tRecall your earlier questions",
         "\t`⌘↩` copies the answer and closes the panel (after a typed question: asks it first)",
         "\t`/history` shows your last 10 questions and answers",
+        "`⌘S`\tKeep the answer as a snippet (☆); select part of it first to keep just that",
+        "\tType a snippet's name and `↩` copies it; `/snippets` lists them",
         "\tThe backtick key takes the greyed name on a `%` or `$` line (`↑`/`↓`: the others)",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
@@ -320,6 +325,60 @@ HELP = (
         "\t\t`$ {name} done`\tor `wip`, `next`, `waiting`, `killed {why}`",
     )),
 )
+# ---- Snippets (row 41): a kept answer's exact text under a name; the name typed alone copies it.
+SNIPPET_NAME_BAD = ("%", "$", "\\", "/")   # a name can't start like a `%` / `$` line, a modifier or a command
+
+
+def snippet_key(name):
+    """How a typed line is matched to a snippet's name: case and extra spaces don't matter."""
+    return " ".join(name.split()).casefold()
+
+
+def load_snippets():
+    """{name: text} from SNIPPETS_FILE: {} when snippets are off or none are kept yet; None when the
+    file can't be read (then nothing is saved over it: it may be someone's only copy)."""
+    if not SNIPPETS_FILE or not os.path.exists(SNIPPETS_FILE):
+        return {}
+    try:
+        with open(SNIPPETS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(data, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in data.items())):
+        return None
+    return data
+
+
+def find_snippet(line):
+    """The (name, text) of the snippet a typed line names exactly, else None."""
+    if not SNIPPETS_FILE or not line.strip():
+        return None
+    key = snippet_key(line)
+    for name, text in (load_snippets() or {}).items():
+        if snippet_key(name) == key:
+            return name, text
+    return None
+
+
+def save_snippet(name, text):
+    """Keep `text` under `name`, replacing a snippet whose name differs only in case or spaces.
+    Returns None, or why nothing was kept."""
+    snippets = load_snippets()
+    if snippets is None:
+        return "%s can't be read; fix or move it first" % SNIPPETS_FILE
+    snippets = {n: t for n, t in snippets.items() if snippet_key(n) != snippet_key(name)}
+    snippets[name] = text
+    try:
+        os.makedirs(os.path.dirname(SNIPPETS_FILE), exist_ok=True)
+        tmp = SNIPPETS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snippets, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, SNIPPETS_FILE)
+    except OSError as e:
+        return "couldn't save it (%s)" % e
+    return None
+
+
 HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
 
 
@@ -921,6 +980,7 @@ class Controller(NSObject):
         self.choice = 0           # which of its suggested names is offered (↑ / ↓)
         self.suggest_seq = 0      # bumped on every edit: an answer for older text is dropped
         self.asking = False       # "Make it? Y / N" is up for the line in the field
+        self.naming = None        # ☆ pressed: the text waiting for a snippet name typed in the field
         self.enter_waits = None   # Enter came before that line's hint: decide when it arrives
         self.in_flight = None     # (seq, line) of the lookup running now, so Enter never asks twice
         self.tip_h = 0            # TIP_H while the hint line shows, else 0
@@ -1047,6 +1107,19 @@ class Controller(NSObject):
         blur.addSubview_(self.copybtn)
         self.copybtn.setHidden_(True)
 
+        # Row 41: keep the answer (or the selected part of it) as a named snippet.
+        self.keepbtn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 26, 22))
+        self.keepbtn.setBordered_(False)
+        self.keepbtn.setTitle_("☆")
+        self.keepbtn.setFont_(NSFont.systemFontOfSize_(15))
+        self.keepbtn.setToolTip_("Keep as snippet  (⌘S; select part of it first to keep just that)")
+        self.keepbtn.setTarget_(self)
+        self.keepbtn.setAction_("keepAnswer:")
+        self.keepbtn.setRefusesFirstResponder_(True)   # a click keeps the answer's selection
+        self.keepbtn.setAutoresizingMask_(1 | 8)
+        blur.addSubview_(self.keepbtn)
+        self.keepbtn.setHidden_(True)
+
     # ---- geometry
     @objc.python_method
     def _place(self, height):
@@ -1084,6 +1157,7 @@ class Controller(NSObject):
         self.separator.setFrameOrigin_((SIDE, answer_top))
         self.scroll.setFrame_(NSMakeRect(0, 0, PANEL_W, answer_top))
         self.copybtn.setFrameOrigin_((PANEL_W - SIDE - 26, answer_top - 28))
+        self.keepbtn.setFrameOrigin_((PANEL_W - SIDE - 52, answer_top - 28))
 
     @objc.python_method
     def _set_tip_h(self, tip_h):
@@ -1134,6 +1208,7 @@ class Controller(NSObject):
         self.close_when_done = False
         self.typed = None
         self.asking, self.enter_waits, self.in_flight = False, None, None
+        self.naming = None
         self.tip_h = 0
         self.bar_h = INPUT_H
         self.tip.setHidden_(True)
@@ -1158,7 +1233,7 @@ class Controller(NSObject):
         self.answer.setString_("")
         self.scroll.setHidden_(True)
         self.separator.setHidden_(True)
-        self.copybtn.setHidden_(True)
+        self._answer_buttons(True)
         self.copybtn.setTitle_("⧉")
         self.input.setStringValue_("")
         self.suggest_seq += 1
@@ -1170,6 +1245,7 @@ class Controller(NSObject):
     @objc.python_method
     def hide(self):
         self.hidden_at = time.time()
+        self.naming = None
         self.panel.orderOut_(None)
         NSApplication.sharedApplication().hide_(None)
 
@@ -1186,6 +1262,9 @@ class Controller(NSObject):
         question = self.input.stringValue().strip()
         if not question or self.answering:
             return
+        if self.naming is not None:   # row 41: the line is the name for the answer ☆ is keeping
+            self._keep_named(question)
+            return
         if not self.recall or self.recall[-1] != question:
             self.recall = (self.recall + [question])[-100:]
         self.recall_at = None
@@ -1200,6 +1279,20 @@ class Controller(NSObject):
         if question.lower() == "/history":
             self.input.setStringValue_("")
             self._show_history()
+            return
+
+        # /snippets — the kept snippets; a click copies one. No API call.
+        if question.lower() == "/snippets":
+            self.input.setStringValue_("")
+            self._show_snippets()
+            return
+
+        # Row 41: a line that is exactly a snippet's name copies its text and closes; nothing is asked.
+        hit = find_snippet(question)
+        if hit:
+            self.input.setStringValue_("")
+            self._copy_to_clipboard(hit[1])
+            self.hide()
             return
 
         # `% ` — hand the line to PERCENT_COMMAND; no LLM. A `#` path not made yet asks first.
@@ -1334,7 +1427,7 @@ class Controller(NSObject):
         self.input.setStringValue_("")
         self._typed_changed()
         self.last_answer = ""
-        self.copybtn.setHidden_(True)
+        self._answer_buttons(True)
 
     @objc.python_method
     def _on_main(self, session, func, *args):
@@ -1352,7 +1445,7 @@ class Controller(NSObject):
         if status == "ok" and text.strip():
             self.messages.append({"role": "model", "parts": [{"text": text}]})
             self.last_answer = text.strip()
-            self.copybtn.setHidden_(False)
+            self._answer_buttons(False)
             self._save_history(question, self.last_answer)
             if copy_when_done:
                 self._copy_to_clipboard(self.last_answer)
@@ -1385,6 +1478,68 @@ class Controller(NSObject):
             pass   # history is a convenience: never let it break an answer
 
     @objc.python_method
+    def _answer_buttons(self, hidden):
+        """The copy and keep buttons show together, once an answer is done (keep: snippets on)."""
+        self.copybtn.setHidden_(hidden)
+        self.keepbtn.setHidden_(hidden or not SNIPPETS_FILE)
+
+    def keepAnswer_(self, sender):
+        """☆ / ⌘S: the answer, or the part of it selected, waits for a name typed in the field."""
+        if not (SNIPPETS_FILE and self.last_answer) or self.answering:
+            return
+        r = self.answer.selectedRange()
+        part = self.answer.textStorage().attributedSubstringFromRange_(r).string().strip() if r.length else ""
+        self.naming = part or self.last_answer
+        self.typed = None
+        self.input.setStringValue_("")
+        self.panel.makeFirstResponder_(self.input)
+        self._show_hint()
+
+    @objc.python_method
+    def _keep_named(self, name):
+        """Enter while ☆ waits: save the text under the typed name, or say why not."""
+        if name.startswith(SNIPPET_NAME_BAD):
+            self._show_tip("☆ A name can't start with %s · type another, or Esc" % " ".join(SNIPPET_NAME_BAD))
+            return
+        problem = save_snippet(name, self.naming)
+        self.naming = None
+        self.input.setStringValue_("")
+        self._show_tip("☆ Not kept: " + problem if problem else
+                       "☆ Kept as \u201c%s\u201d · type it and ↩ copies it" % name)
+
+    @objc.python_method
+    def _show_snippets(self):
+        """List the kept snippets, each a link: a click copies it and closes. No API call."""
+        self.last_answer = ""
+        self._answer_buttons(True)
+        self.answer.setString_("")
+        self._grow()
+        snippets = load_snippets() if SNIPPETS_FILE else {}
+        if not SNIPPETS_FILE:
+            self._say("Snippets are off: set SNIPPETS_FILE in derpderp_config.py.")
+            return
+        if snippets is None:
+            self._say("%s can't be read." % SNIPPETS_FILE)
+            return
+        if not snippets:
+            self._say("No snippets yet. ☆ on an answer (or ⌘S) keeps one.")
+            return
+        dim = {NSFontAttributeName: NSFont.systemFontOfSize_(12),
+               NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
+        out = NSMutableAttributedString.alloc().init()
+        def add(text, attrs):
+            out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
+        for n, (name, text) in enumerate(snippets.items()):
+            link = dict(body_attributes())
+            link[NSLinkAttributeName] = NSURL.URLWithString_(
+                "derpderp-snippet:" + urllib.parse.quote(name, safe=""))
+            first = (text.strip().splitlines() or [""])[0]
+            add(("\n" if n else "") + name, link)
+            add("   " + (first if len(first) <= 60 else first[:59] + "…"), dim)
+        add("\n\nClick one to copy it, or type its name and ↩", dim)
+        self._append(out, jump=True)
+
+    @objc.python_method
     def _show_history(self, count=10):
         """Show the last `count` saved answers. No API call."""
         try:
@@ -1395,7 +1550,7 @@ class Controller(NSObject):
             tail = ""
         entries = re.split(r"(?m)^(?=Q: )", tail)[1:][-count:]
         self.last_answer = ""
-        self.copybtn.setHidden_(True)
+        self._answer_buttons(True)
         self.answer.setString_("")
         self._grow()
         if entries:
@@ -1483,6 +1638,12 @@ class Controller(NSObject):
         """An item link from the task app opens in the browser and the panel steps aside; any other
         link (Sources) opens as before."""
         url = str(link.absoluteString() if hasattr(link, "absoluteString") else link)
+        if url.startswith("derpderp-snippet:"):   # row 41: a /snippets line copies its text
+            hit = find_snippet(urllib.parse.unquote(url.split(":", 1)[1]))
+            if hit:
+                self._copy_to_clipboard(hit[1])
+                self.hide()
+            return True
         base = _toderp_origin()
         if not (base and url.startswith(base + "/")):
             return False
@@ -1686,10 +1847,17 @@ class Controller(NSObject):
     @objc.python_method
     def _show_hint(self):
         """Fill (or clear) the hint line and the greyed rest of the predicted name."""
+        if self.naming is not None:   # row 41: ☆ waits for a name
+            self.ghost.setHidden_(True)
+            self._show_tip("☆ Name this snippet, then ↩ keeps it · Esc closes without keeping")
+            return
         t = self._current_hint() if self.typed else None
         if not t:
             self.ghost.setHidden_(True)
-            if self.typed is None:   # typed on with a hint up: keep it until the new answer
+            hit = find_snippet(self.input.stringValue()) if self.typed is None else None
+            if hit:
+                self._show_tip("☆ ↩ copies your snippet \u201c%s\u201d" % hit[0])
+            elif self.typed is None:   # typed on with a hint up: keep it until the new answer
                 self.tip.setHidden_(True)
                 self._set_tip_h(0)
             return
@@ -1822,7 +1990,7 @@ class Controller(NSObject):
     def _show_help(self):
         """Expand the panel and display the modifier cheatsheet. No API call."""
         self.last_answer = ""
-        self.copybtn.setHidden_(True)
+        self._answer_buttons(True)
         self.answer.setString_("")
         self._grow()
         self.answer.textStorage().setAttributedString_(help_attributed())
@@ -1946,6 +2114,14 @@ class Controller(NSObject):
         ):
             self._copy_to_clipboard(self.last_answer)
             self.hide()
+            return None
+        # ⌘S keeps the answer (or the selected part of it) as a snippet (row 41).
+        if (
+            (event.modifierFlags() & NSEventModifierFlagCommand)
+            and event.charactersIgnoringModifiers() == "s"
+            and SNIPPETS_FILE and self.last_answer and not self.answering
+        ):
+            self.keepAnswer_(None)
             return None
         # ⌘C with nothing selected copies the whole last answer.
         if (

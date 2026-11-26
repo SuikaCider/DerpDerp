@@ -41,6 +41,9 @@ USAGE_FILE = "~/.cache/derpderp_usage.json"
 LOCK_FILE  = "~/.cache/derpderp.lock"
 # Every finished answer is appended here as "Q: ..." / "A: ..." (blank = no history).
 HISTORY_FILE = "~/.cache/derpderp_history.txt"
+# Answers you keep with ☆ (or ⌘S) are saved here as {"name": "text"}; a name typed
+# alone copies its text, offline (blank = snippets off).
+SNIPPETS_FILE = "~/Library/Application Support/DerpDerp/snippets.json"
 
 # --- Panel ------------------------------------------------------------------
 KEEP_ANSWER_MINUTES = 5        # reopen within this long and the last answer is still there
