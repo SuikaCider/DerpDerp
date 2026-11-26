@@ -78,6 +78,9 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSItalicFontMask,
     NSLinkAttributeName,
+    NSUnderlineStyleAttributeName,
+    NSCursor,
+    NSCursorAttributeName,
     NSBox,
     NSEventMaskKeyDown,
     NSMakeRect,
@@ -331,6 +334,16 @@ HELP = (
         "\t\t`$! {name}`\tfinds done and killed items too; only looks",
     )),
 )
+def link_attributes(attrs, url, dim=False):
+    """A link's look is its own text's (the answer view's link style only sets the cursor), so a closed
+    item's link can be dim (row 47): link blue and underlined, or the dim grey and underlined."""
+    out = dict(attrs)
+    out[NSLinkAttributeName] = url
+    out[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor() if dim else NSColor.linkColor()
+    out[NSUnderlineStyleAttributeName] = 1
+    return out
+
+
 def dollar_line(line):
     """A `$ ` status line, or a `$! ` lookup (row 47: closed items too, never sets). `$5`, `$!x`: plain."""
     return line.startswith(("$ ", "$! "))
@@ -1103,6 +1116,8 @@ class Controller(NSObject):
         self.answer.setDrawsBackground_(False)
         self.answer.setEditable_(False)
         self.answer.setDelegate_(self)   # an item link from the task app steps the panel aside
+        # links draw in their own colors (link_attributes); the view adds only the hand cursor
+        self.answer.setLinkTextAttributes_({NSCursorAttributeName: NSCursor.pointingHandCursor()})
         self.answer.setTextContainerInset_((16, 12))
         self.answer.setTextColor_(NSColor.labelColor())
         self.scroll.setDocumentView_(self.answer)
@@ -1546,9 +1561,8 @@ class Controller(NSObject):
         def add(text, attrs):
             out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
         for n, (name, text) in enumerate(snippets.items()):
-            link = dict(body_attributes())
-            link[NSLinkAttributeName] = NSURL.URLWithString_(
-                "derpderp-snippet:" + urllib.parse.quote(name, safe=""))
+            link = link_attributes(body_attributes(), NSURL.URLWithString_(
+                "derpderp-snippet:" + urllib.parse.quote(name, safe="")))
             first = (text.strip().splitlines() or [""])[0]
             add(("\n" if n else "") + name, link)
             add("   " + (first if len(first) <= 60 else first[:59] + "…"), dim)
@@ -1594,7 +1608,7 @@ class Controller(NSObject):
         for n, (title, url) in enumerate(links[:limit]):
             if n:
                 add("  ·  ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
-            add(title, {NSFontAttributeName: small, NSLinkAttributeName: NSURL.URLWithString_(url)})
+            add(title, link_attributes({NSFontAttributeName: small}, NSURL.URLWithString_(url)))
         add("\n\n", {NSFontAttributeName: small})
         self._append(line)
 
@@ -1633,16 +1647,18 @@ class Controller(NSObject):
             out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
         for n, i in enumerate(items):
             open_path = i.get("open") if t.get("live") and base else None
-            name = dict(body_attributes())
-            if i.get("closed") is True:   # row 47: a `$!` lookup's ✅ / 💀 items, dim
-                name[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor()
+            closed = i.get("closed") is True   # row 47: a `$!` lookup's ✅ / 💀 items, the whole line dim
+            plain = dict(body_attributes())
+            if closed:
+                plain[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor()
+            name = plain
             if isinstance(open_path, str) and open_path.startswith("/"):
-                name[NSLinkAttributeName] = NSURL.URLWithString_(base + open_path)
+                name = link_attributes(body_attributes(), NSURL.URLWithString_(base + open_path), dim=closed)
             if n:
                 add("\n", body_attributes())
             add(i.get("display") or i["path"], name)
             if i.get("state"):
-                add(" · " + i["state"], body_attributes())
+                add(" · " + i["state"], plain)
         if not items:
             add("No open item matches \u201c%s\u201d" % (t.get("partial") or line[2:].strip()), body_attributes())
         many = re.match(r"(\d+) open items match", t.get("problem") or "")
