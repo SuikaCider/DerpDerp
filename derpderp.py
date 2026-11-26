@@ -21,7 +21,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
               with PERCENT_SET_COMMAND set, Enter on a line whose name names one open item and
               gives a status asks "Sets <item> → <status>. Set it? Y / N"
     $         with PERCENT_COMMAND set: a status line, handed over whole ("$ <item> done"); the
-              suggest answer offers matching items (` takes one) and says what's missing
+              suggest answer offers matching items (` takes one) and says what's missing;
+              `$! <words>` finds closed items too (✅ / 💀, listed dim) and only looks
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers. ☆ (⌘S) keeps an answer, or the part of it you selected, as a
@@ -327,8 +328,18 @@ HELP = (
         "`$`\tSet an item's status, or find one",
         "\t\t`$ {name}`\tEnter lists the open items it matches",
         "\t\t`$ {name} done`\tor `wip`, `next`, `waiting`, `killed {why}`",
+        "\t\t`$! {name}`\tfinds done and killed items too; only looks",
     )),
 )
+def dollar_line(line):
+    """A `$ ` status line, or a `$! ` lookup (row 47: closed items too, never sets). `$5`, `$!x`: plain."""
+    return line.startswith(("$ ", "$! "))
+
+
+def dollar_prefix(line):
+    return "$! " if line.startswith("$! ") else "$ "
+
+
 # ---- Snippets (row 41): a kept answer's exact text under a name; the name typed alone copies it.
 SNIPPET_NAME_BAD = ("%", "$", "\\", "/")   # a name can't start like a `%` / `$` line, a modifier or a command
 
@@ -1303,9 +1314,9 @@ class Controller(NSObject):
         # `$ ` (with PERCENT_COMMAND set) — a status line, handed over whole; one its hint
         # says isn't ready (no status yet, killed without a why) stays in the field.
         line = self.input.stringValue()
-        dollar = bool(PERCENT_COMMAND) and line.startswith("$ ")
+        dollar = bool(PERCENT_COMMAND) and dollar_line(line)
         if question.startswith("% ") or dollar:
-            if dollar and not line[2:].strip():
+            if dollar and not line[len(dollar_prefix(line)):].strip():
                 return
             if ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and not self._current_hint()
                     and (dollar or (PERCENT_MAKE_COMMAND and "#" in line)
@@ -1593,7 +1604,7 @@ class Controller(NSObject):
         why); a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND), and so does a line
         naming one open item with a status (with PERCENT_SET_COMMAND); else run it."""
         t = self._current_hint()
-        if line.startswith("$ "):
+        if dollar_line(line):
             if t and t.get("mode") == "status" and t.get("problem"):
                 if not t.get("status"):   # row 40: no status typed: list what it matches, change nothing
                     self._list_items(line.strip(), t)
@@ -1623,6 +1634,8 @@ class Controller(NSObject):
         for n, i in enumerate(items):
             open_path = i.get("open") if t.get("live") and base else None
             name = dict(body_attributes())
+            if i.get("closed") is True:   # row 47: a `$!` lookup's ✅ / 💀 items, dim
+                name[NSForegroundColorAttributeName] = NSColor.secondaryLabelColor()
             if isinstance(open_path, str) and open_path.startswith("/"):
                 name[NSLinkAttributeName] = NSURL.URLWithString_(base + open_path)
             if n:
@@ -1735,7 +1748,7 @@ class Controller(NSObject):
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
-        typed = (line.startswith("% ") and line[2:].strip()) or (PERCENT_COMMAND and line.startswith("$ "))
+        typed = (line.startswith("% ") and line[2:].strip()) or (PERCENT_COMMAND and dollar_line(line))
         if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and typed):
             self.typed = None
             self._show_hint()
@@ -1750,7 +1763,7 @@ class Controller(NSObject):
         session = self.session
 
         def worker():
-            q, data, live = (line if line.startswith("$ ") else line[2:].strip()), None, False   # `$ ` kept
+            q, data, live = (line if dollar_line(line) else line[2:].strip()), None, False   # `$ ` / `$! ` kept
             if PERCENT_SUGGEST_URL:
                 try:
                     url = "%s%s%s" % (PERCENT_SUGGEST_URL, "&" if "?" in PERCENT_SUGGEST_URL else "?",
@@ -1956,7 +1969,8 @@ class Controller(NSObject):
             return False
         line = t["q"]
         if self._offers()[0] == "item":   # a `$` line: the item's path, then a space for the status
-            self.input.setStringValue_("$ " + name + " ")
+            lookup = line.startswith("$! ")   # row 47: a `$!` lookup takes no status
+            self.input.setStringValue_(dollar_prefix(line) + name + ("" if lookup else " "))
         elif self._offers()[0] == "day":   # the partial @day becomes the word, then a space
             partial = t["days"]["partial"]
             if not line.endswith(partial):
