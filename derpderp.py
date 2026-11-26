@@ -86,6 +86,7 @@ from AppKit import (
     NSTextView,
     NSVisualEffectView,
     NSFontWeightSemibold,
+    NSWorkspace,
     NSBaselineOffsetAttributeName,
     NSMutableParagraphStyle,
     NSParagraphStyle,
@@ -254,6 +255,13 @@ BAR_MAX = INPUT_H + ANSWER_H - 120   # the tallest the question bar grows for a 
 SUGGEST_DELAY = 0.25   # seconds of no typing before the suggest command is asked
 SUGGEST_URL_TIMEOUT = 1.0   # seconds PERCENT_SUGGEST_URL gets to answer before the command is asked
 
+
+def _toderp_origin():
+    """Where the running To Derp page lives (scheme and host of PERCENT_SUGGEST_URL), for the
+    `open` paths it sends with `$` items; "" when that setting is blank."""
+    parts = urllib.parse.urlsplit(PERCENT_SUGGEST_URL or "")
+    return "%s://%s" % (parts.scheme, parts.netloc) if parts.scheme and parts.netloc else ""
+
 SYSTEM = (
     "You are a Spotlight-style quick answer overlay. "
     "When asked straightforward factual questions, respond concisely and directly. "
@@ -300,12 +308,12 @@ HELP = (
         "\tThe backtick key takes the greyed name on a `%` or `$` line (`↑`/`↓`: the others)",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
-        "`%`\tAdd a task to today's Adhoc box: `% call Lucas`",
+        "`%`\tAdd a task to Adhoc › Sort later, pinned: `% call Lucas`",
         "\twhere\t`@monday`\tremind me next Monday (in Inbox)",
         "\t\t`#Area/Project/Task`\tfile it under that item",
-        "\textras\t`| note`\ta note on a `#` or `@day`: `| [doc](https://…)`",
-        "\t\t`$wip`\tstatus, on a `#` (or `$next`, `$waiting`, `$done`)",
-        "\t\t`*pin`\tpin it, on a `#`",
+        "\textras\t`| note`\ta note, e.g. `| [doc](https://…)`",
+        "\t\t`$wip`\tits status (or `$next`, `$waiting`, `$done`)",
+        "\t\t`*pin`\tpin it",
         "\te.g.\t`% draft brief #vibe/campaigns | [doc](https://…) $wip *pin`",
         "`$`\tSet an item's status, or find one",
         "\t\t`$ {name}`\tEnter lists the open items it matches",
@@ -1019,6 +1027,7 @@ class Controller(NSObject):
         self.answer.setFont_(NSFont.systemFontOfSize_(14))
         self.answer.setDrawsBackground_(False)
         self.answer.setEditable_(False)
+        self.answer.setDelegate_(self)   # row 44: a To Derp item link steps the panel aside
         self.answer.setTextContainerInset_((16, 12))
         self.answer.setTextColor_(NSColor.labelColor())
         self.scroll.setDocumentView_(self.answer)
@@ -1440,17 +1449,46 @@ class Controller(NSObject):
     @objc.python_method
     def _list_items(self, line, t):
         """Row 40: every open item a `$` line matches, with its status; read-only, the line stays
-        in the field so a status can still be added."""
-        items = t.get("items") or []
-        rows = [" · ".join(x for x in (i.get("display") or i["path"], i.get("state")) if x) for i in items]
-        if not rows:
-            rows = ["No open item matches \u201c%s\u201d" % (t.get("partial") or line[2:].strip())]
+        in the field so a status can still be added. Row 44: an item the running To Derp page sent
+        an `open` path for is a link to it there; with the page down, a dim line says why there are none."""
+        items, base = t.get("items") or [], _toderp_origin()
+        out = NSMutableAttributedString.alloc().init()
+        def add(text, attrs):
+            out.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
+        for n, i in enumerate(items):
+            open_path = i.get("open") if t.get("live") and base else None
+            name = dict(body_attributes())
+            if isinstance(open_path, str) and open_path.startswith("/"):
+                name[NSLinkAttributeName] = NSURL.URLWithString_(base + open_path)
+            if n:
+                add("\n", body_attributes())
+            add(i.get("display") or i["path"], name)
+            if i.get("state"):
+                add(" · " + i["state"], body_attributes())
+        if not items:
+            add("No open item matches \u201c%s\u201d" % (t.get("partial") or line[2:].strip()), body_attributes())
         many = re.match(r"(\d+) open items match", t.get("problem") or "")
         if many and int(many.group(1)) > len(items):
-            rows.append("showing %d of %s: type more to narrow" % (len(items), many.group(1)))
+            add("\nshowing %d of %s: type more to narrow" % (len(items), many.group(1)), body_attributes())
+        if items and base and not t.get("live"):
+            add("\n\nTo Derp isn't running: start it to open an item",
+                {NSFontAttributeName: NSFont.systemFontOfSize_(12),
+                 NSForegroundColorAttributeName: NSColor.secondaryLabelColor()})
         prefix = "\n\n" if self.answer.string() else ""
-        self._say("%s\u203a %s\n\n%s" % (prefix, line, "\n".join(rows)))
+        self._say("%s\u203a %s\n\n" % (prefix, line))
+        self._append(out, jump=True)
         self._grow()
+
+    def textView_clickedOnLink_atIndex_(self, view, link, index):
+        """Row 44: a To Derp item link opens in the browser and the panel steps aside; any other
+        link (Sources) opens as before."""
+        url = str(link.absoluteString() if hasattr(link, "absoluteString") else link)
+        base = _toderp_origin()
+        if not (base and url.startswith(base + "/")):
+            return False
+        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
+        self.hide()
+        return True
 
     @objc.python_method
     def _run_percent(self, line, make=False, shown=None):
@@ -1541,7 +1579,7 @@ class Controller(NSObject):
         session = self.session
 
         def worker():
-            q, data = (line if line.startswith("$ ") else line[2:].strip()), None   # `$ ` kept
+            q, data, live = (line if line.startswith("$ ") else line[2:].strip()), None, False   # `$ ` kept
             if PERCENT_SUGGEST_URL:
                 try:
                     url = "%s%s%s" % (PERCENT_SUGGEST_URL, "&" if "?" in PERCENT_SUGGEST_URL else "?",
@@ -1549,6 +1587,7 @@ class Controller(NSObject):
                     no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                     with no_proxy.open(url, timeout=SUGGEST_URL_TIMEOUT) as r:
                         data = json.loads(r.read().decode("utf-8"))
+                    live = True
                 except Exception:  # not running, too slow, or not JSON: ask the command
                     data = None
             if data is None and PERCENT_SUGGEST_COMMAND:
@@ -1559,12 +1598,12 @@ class Controller(NSObject):
                         data = json.loads(r.stdout.strip().splitlines()[0])
                 except Exception:  # no hint is better than a stuck or crashed panel
                     data = None
-            self._on_main(session, self._got_suggest, seq, line, data)
+            self._on_main(session, self._got_suggest, seq, line, data, live)
 
         threading.Thread(target=worker, daemon=True).start()
 
     @objc.python_method
-    def _got_suggest(self, seq, line, data):
+    def _got_suggest(self, seq, line, data, live=False):
         if self.in_flight == (seq, line):
             self.in_flight = None
         if seq != self.suggest_seq or self.input.stringValue() != line:
@@ -1581,7 +1620,8 @@ class Controller(NSObject):
         plain = isinstance(data, dict) and data.get("mode") in ("add", "remind") and place is None
         status = (isinstance(data, dict) and data.get("mode") == "status" and isinstance(data.get("items"), list)
                   and all(isinstance(i, dict) and isinstance(i.get("path"), str) for i in data["items"]))
-        self.typed = dict(data, q=line) if ok else dict(data, q=line, place={}) if plain or status else None
+        self.typed = (dict(data, q=line, live=live) if ok else dict(data, q=line, place={}, live=live)
+                      if plain or status else None)
         self.choice = 0
         self._show_hint()
         if self.enter_waits == line:   # Enter was pressed before this answer: act on it now
@@ -1684,7 +1724,7 @@ class Controller(NSObject):
             return
         if t.get("mode") in ("add", "remind"):   # no `#`: say where Enter puts it
             tip = ("⏰ Inbox %s · Enter files it in Inbox with this reminder" % day if t["mode"] == "remind"
-                   else "＋ Adhoc · Enter adds it to Adhoc")
+                   else "＋ Sort later · Enter files it in Adhoc › Sort later, 📌 pinned")
             self.ghost.setHidden_(True)
             self._show_tip(tip)
             return
