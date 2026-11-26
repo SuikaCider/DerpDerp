@@ -276,7 +276,8 @@ DIRECT_INSTRUCTION = (
 # Shown in-panel when the user submits "/help". Purely local — no API call.
 # Each section: (header, note beside it, lines). In a line, `backticks` mark a
 # modifier or command (drawn grey) and a tab starts the explanation, so every
-# explanation begins at HELP_COLUMN.
+# explanation begins at HELP_COLUMN. A nested line ("\tlabel\t`token`\twhat it does";
+# the label may be blank) lays out a command's parts in three more columns.
 HELP = (
     ("SEARCH ENGINES", "", (
         "`␣`\tGroq response; yes wikipedia, no search",
@@ -296,17 +297,18 @@ HELP = (
         "`↑`\tRecall your earlier questions",
         "\t`⌘↩` copies the answer and closes the panel (after a typed question: asks it first)",
         "\t`/history` shows your last 10 questions and answers",
+        "\tThe backtick key takes the greyed name on a `%` or `$` line (`↑`/`↓`: the others)",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
-        "`%`\tLog an item into To Derp's inbox",
-        "\tEnd task with `@weekday` (i.e., `@monday`) → be reminded next Monday",
-        "\t`#{Area}/{Project}/{Task}/{Subtask}` → Log directly to a registered To Derp item",
-        "\tAfter `|` on a `#` or `@day` line → a note, e.g. `| [doc](https://…)`",
-        "\tEnd a `#` line with `$wip`, `$next`, `$waiting` or `$done` → its status",
-        "\tAdd `*pin` to a `#` line → pins the item",
-        "\tAfter a `#` or `@`, the backtick key takes the greyed name (`↑`/`↓`: the others)",
-        "`$`\tSet an item's status: type part of its name, the backtick key takes it,",
-        "\tthen `done`, `wip`, `next`, `waiting` or `killed {why}`",
+        "`%`\tAdd a task to today's Adhoc box: `% call Lucas`",
+        "\twhere\t`@monday`\tremind me next Monday (in Inbox)",
+        "\t\t`#Area/Project/Task`\tfile it under that item",
+        "\textras\t`| note`\ta note on a `#` or `@day`: `| [doc](https://…)`",
+        "\t\t`$wip`\tstatus, on a `#` (or `$next`, `$waiting`, `$done`)",
+        "\t\t`*pin`\tpin it, on a `#`",
+        "\te.g.\t`% draft brief #vibe/campaigns | [doc](https://…) $wip *pin`",
+        "`$`\tSet an item's status",
+        "\t\t`$ {name} done`\tor `wip`, `next`, `waiting`, `killed {why}`",
     )),
 )
 HELP_COLUMN = 30   # points from a modifier's left edge to where its explanation starts
@@ -336,6 +338,22 @@ def help_attributed():
     rows.setFirstLineHeadIndent_(indent)
     rows.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(0, indent + HELP_COLUMN, {})])
     rows.setHeadIndent_(indent + HELP_COLUMN)   # a wrapped explanation stays in its column
+    # Nested lines: label, token and explanation columns, each as wide as its widest
+    # entry plus the same gap as the first level (a token with no explanation after
+    # it, like an e.g. line, doesn't set the token column's width).
+    def width(text):
+        return NSAttributedString.alloc().initWithString_attributes_(
+            text.replace("`", ""), {NSFontAttributeName: body}).size().width
+    nested = [line.split("\t") for _, _, lines in HELP for line in lines
+              if line.startswith("\t") and line.count("\t") >= 2]
+    col1 = indent + HELP_COLUMN
+    col2 = round(col1 + max(width(f[1]) for f in nested) + indent)
+    col3 = round(col2 + max(width(f[2]) for f in nested if len(f) > 3) + indent)
+    parts = NSMutableParagraphStyle.alloc().init()
+    parts.setFirstLineHeadIndent_(indent)
+    parts.setTabStops_([NSTextTab.alloc().initWithTextAlignment_location_options_(0, x, {})
+                        for x in (col1, col2, col3)])
+    parts.setHeadIndent_(col3)
     out = NSMutableAttributedString.alloc().init()
 
     def add(text, font, para, grey=False):
@@ -358,7 +376,8 @@ def help_attributed():
             add_marked("  " + note, body, header)
         add("\n", body, header)
         for line in lines:
-            add_marked(line + "\n", body, rows)
+            nest = line.startswith("\t") and line.count("\t") >= 2
+            add_marked(line + "\n", body, parts if nest else rows)
     return out
 
 
