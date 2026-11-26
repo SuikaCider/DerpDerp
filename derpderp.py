@@ -437,50 +437,37 @@ def wiki_search(query, max_titles=3, char_cap=1200, timeout=15, sources=None):
     """Free, keyless web lookup via the Wikipedia API.
 
     Returns a plain-text context block of intro extracts for the top matching
-    articles, or "" on no hit / failure. This sidesteps Gemini's Google Search
+    articles, best match first, or "" on no hit / failure. This sidesteps Gemini's Google Search
     grounding (which is 0-quota on the free tier for Gemini 3.x). It's good for
     factual/encyclopedic questions; it will NOT have live data such as today's
     news, sports scores, or current prices. Each article used is added to
-    `sources` as (title, url), for the links under the answer.
+    `sources` as (title, url), for the links above the answer.
     """
     try:
-        search_url = WIKI_API + "?" + urllib.parse.urlencode(
+        # One request (row 36): the search and the intros together, so the links can show sooner.
+        url = WIKI_API + "?" + urllib.parse.urlencode(
             {
                 "action": "query",
-                "list": "search",
-                "srsearch": query,
-                "srlimit": max_titles,
-                "format": "json",
-            }
-        )
-        hits = json.load(
-            urllib.request.urlopen(
-                urllib.request.Request(search_url, headers=WIKI_UA), timeout=timeout
-            )
-        )
-        titles = [h["title"] for h in hits.get("query", {}).get("search", [])]
-        if not titles:
-            return ""
-
-        extract_url = WIKI_API + "?" + urllib.parse.urlencode(
-            {
-                "action": "query",
+                "generator": "search",
+                "gsrsearch": query,
+                "gsrlimit": max_titles,
                 "prop": "extracts",
                 "exintro": 1,
                 "explaintext": 1,
-                "redirects": 1,
-                "titles": "|".join(titles),
+                "exlimit": max_titles,
                 "format": "json",
             }
         )
         pages = json.load(
             urllib.request.urlopen(
-                urllib.request.Request(extract_url, headers=WIKI_UA), timeout=timeout
+                urllib.request.Request(url, headers=WIKI_UA), timeout=timeout
             )
-        )["query"]["pages"]
+        ).get("query", {}).get("pages", {})
+        # Pages come back keyed by page id; `index` is the search rank (best match first).
+        pages = sorted(pages.values(), key=lambda p: p.get("index", 99))
 
         blocks = []
-        for page in pages.values():
+        for page in pages:
             extract = (page.get("extract") or "").strip()
             if extract:
                 blocks.append("## %s\n%s" % (page.get("title", ""), extract[:char_cap]))
@@ -1289,6 +1276,8 @@ class Controller(NSObject):
                         if search_note:
                             chunk(search_note + "\n\n")
                     context = "\n\n".join(c for c in contexts if c)
+                    # Row 36: the links show now, above the answer, not after it.
+                    self._on_main(session, self._append_sources, list(sources))
                     if context:
                         augmented = (
                             "Web results:\n%s\n\n"
@@ -1305,7 +1294,7 @@ class Controller(NSObject):
                 note = _redact("[error] %s" % e)
             finally:
                 self._on_main(session, self._finish_answer, user_msg, text, status, note, footer,
-                              question, sources, copy_when_done)
+                              question, copy_when_done)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1329,7 +1318,7 @@ class Controller(NSObject):
 
     @objc.python_method
     def _finish_answer(self, user_msg, text, status, note, footer,
-                       question="", sources=(), copy_when_done=False):
+                       question="", copy_when_done=False):
         """Everything that ends a question, in one main-thread step (A4)."""
         if status == "ok" and text.strip():
             self.messages.append({"role": "model", "parts": [{"text": text}]})
@@ -1341,7 +1330,6 @@ class Controller(NSObject):
                 self.copybtn.setTitle_("✓")
                 self.performSelector_withObject_afterDelay_("resetCopyTitle:", None, 1.0)
                 footer = (footer + "   ·   copied") if footer else "\n\n— copied"
-            self._append_sources(sources)
         else:
             # Not a complete answer (A7): shown, but neither kept for follow-ups nor copyable.
             if self.messages and self.messages[-1] is user_msg:
@@ -1389,7 +1377,7 @@ class Controller(NSObject):
 
     @objc.python_method
     def _append_sources(self, sources, limit=5):
-        """A dim line of clickable links to the pages the answer was built from."""
+        """A dim line of clickable links to the pages the answer is built from, shown above it."""
         seen, links = set(), []
         for title, url in sources:
             if url and url not in seen:
@@ -1402,11 +1390,12 @@ class Controller(NSObject):
         line = NSMutableAttributedString.alloc().init()
         def add(text, attrs):
             line.appendAttributedString_(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
-        add("\n\nSources: ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
+        add("Sources: ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
         for n, (title, url) in enumerate(links[:limit]):
             if n:
                 add("  ·  ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
             add(title, {NSFontAttributeName: small, NSLinkAttributeName: NSURL.URLWithString_(url)})
+        add("\n\n", {NSFontAttributeName: small})
         self._append(line)
 
     @objc.python_method
