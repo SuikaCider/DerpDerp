@@ -1263,7 +1263,7 @@ class Controller(NSObject):
         self.messages.append(user_msg)
 
         prefix = "\n\n" if self.answer.string() else ""
-        self.appendText_("%s› %s\n\n" % (prefix, echo))
+        self._say("%s› %s\n\n" % (prefix, echo))
         self._grow()
 
         def chunk(text):
@@ -1382,9 +1382,9 @@ class Controller(NSObject):
         self.answer.setString_("")
         self._grow()
         if entries:
-            self.appendText_("\n".join(e.strip() + "\n" for e in entries))
+            self._say("\n".join(e.strip() + "\n" for e in entries))
         else:
-            self.appendText_("No history yet." if HISTORY_FILE else
+            self._say("No history yet." if HISTORY_FILE else
                              "History is off: set HISTORY_FILE in derpderp_config.py.")
 
     @objc.python_method
@@ -1407,9 +1407,7 @@ class Controller(NSObject):
             if n:
                 add("  ·  ", {NSFontAttributeName: small, NSForegroundColorAttributeName: grey})
             add(title, {NSFontAttributeName: small, NSLinkAttributeName: NSURL.URLWithString_(url)})
-        storage = self.answer.textStorage()
-        storage.appendAttributedString_(line)
-        self.answer.scrollRangeToVisible_((storage.length(), 0))
+        self._append(line)
 
     @objc.python_method
     def _percent_enter(self, line):
@@ -1438,7 +1436,7 @@ class Controller(NSObject):
         self._begin()
         session = self.session
         prefix = "\n\n" if self.answer.string() else ""
-        self.appendText_("%s\u203a %s\n\n" % (prefix, shown or "% " + line))
+        self._say("%s\u203a %s\n\n" % (prefix, shown or "% " + line))
         self._grow()
 
         def worker():
@@ -1767,16 +1765,31 @@ class Controller(NSObject):
         """A one-line note in the panel; the typed line stays in the field to finish."""
         prefix = "\n\n" if self.answer.string() else ""
         self._grow()
-        self.appendText_(prefix + text)
+        self._say(prefix + text)
 
     def appendText_(self, text):
+        """Streamed text: added at the end in the plain answer style (not the help's or footer's)."""
+        self._append(NSAttributedString.alloc().initWithString_attributes_(text, body_attributes()))
+
+    @objc.python_method
+    def _say(self, text):
+        """A line the reader just caused (their question, a % result's echo, a hint): always shown."""
+        self._append(NSAttributedString.alloc().initWithString_attributes_(text, body_attributes()), jump=True)
+
+    @objc.python_method
+    def _append(self, attributed, jump=False):
+        """Row 38: add text at the end without touching the reader's selection, and scroll to it
+        only when they are already at the bottom (or `jump`), so a reader who scrolled up stays put."""
+        follow = jump or self._at_bottom()
         storage = self.answer.textStorage()
-        self.answer.setEditable_(True)
-        self.answer.setSelectedRange_((storage.length(), 0))
-        self.answer.setTypingAttributes_(body_attributes())  # not the help's or footer's style
-        self.answer.insertText_(text)
-        self.answer.setEditable_(False)
-        self.answer.scrollRangeToVisible_((storage.length(), 0))
+        storage.appendAttributedString_(attributed)
+        if follow:
+            self.answer.scrollRangeToVisible_((storage.length(), 0))
+
+    @objc.python_method
+    def _at_bottom(self):
+        seen = self.scroll.contentView().documentVisibleRect()
+        return seen.origin.y + seen.size.height >= self.answer.frame().size.height - 24
 
     def appendFooter_(self, text):
         """Append the quota readout as dim italic text (its own attributes, so
@@ -1790,10 +1803,7 @@ class Controller(NSObject):
             NSFontAttributeName: italic,
             NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
         }
-        note = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
-        storage = self.answer.textStorage()
-        storage.appendAttributedString_(note)
-        self.answer.scrollRangeToVisible_((storage.length(), 0))
+        self._append(NSAttributedString.alloc().initWithString_attributes_(text, attrs))
 
     # ---- copy answer
 
