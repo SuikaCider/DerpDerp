@@ -252,7 +252,7 @@ The **search layer**, if invoked, appends additional context to your query to he
 - **[Tavily](https://www.tavily.com/)** → A freemium API. You get 1,000 monthly queries for free. If invoked, Tavili will search for your query and (somehow) feed the answer into your LLM. I think. 
 - **[Wiktionary](https://en.wiktionary.org/w/api.php)** → Also free and open. With the `w` flag, DerpDerp finds which words in your question have a Wiktionary entry and hands the LLM up to two of them (meanings, IPA, etymology). Wikipedia rarely has those for an ordinary word.
 
-Whenever a search runs, the pages it used show up as clickable **Sources** links under the answer.
+Whenever a search runs, the pages it used show up as clickable **Sources** links above the answer, as soon as the search finishes.
 
 The **LLM layer** is where your query and any additional context is handed to an LLM.
 - **[Groq](https://console.groq.com/)** → Connects you to small LLM models; if you're using DerpDerp for small, simple queries, as intended, you'll never hit its daily rate limit
@@ -396,7 +396,7 @@ For the few straightforward things I expect to go wrong, here's a cheatsheet:
 It's one file, roughly in this order:
 
 1. **SETTINGS block + `load_config`** — the built-in defaults, replaced by anything in your `derpderp_config.py`; then `load_secret` lets keys in your environment or `~/.secrets` win.
-2. **`wiki_search` / `wiktionary_search` / `tavily_search` / `web_search`** — the search layer; each one also collects the Sources links shown under the answer.
+2. **`wiki_search` / `wiktionary_search` / `tavily_search` / `web_search`** — the search layer; each one also collects the Sources links shown above the answer.
 3. **`stream` (Gemini) / `stream_openai` (Groq) / `llm_stream`** — the LLM layer; `llm_stream` picks the engine, and hands off to Gemini when Groq is rate limiting.
 4. **`Controller` / `Panel`** — the macOS panel: building the UI, parsing modifiers in `submit()`, streaming text in, the copy button, the quota footer, Sources links, ↑ recall, the kept answer, `/history`, and `%` lines (`_run_percent`).
 5. **`main()`** — acquires the single-instance lock and registers the global hotkey + the key monitors (Esc, ⌘C, ⌘↩, ⌘A/⌘V/⌘X).
