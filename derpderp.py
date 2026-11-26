@@ -257,7 +257,7 @@ SUGGEST_URL_TIMEOUT = 1.0   # seconds PERCENT_SUGGEST_URL gets to answer before 
 
 
 def _toderp_origin():
-    """Where the running To Derp page lives (scheme and host of PERCENT_SUGGEST_URL), for the
+    """Where the running task app lives (scheme and host of PERCENT_SUGGEST_URL), for the
     `open` paths it sends with `$` items; "" when that setting is blank."""
     parts = urllib.parse.urlsplit(PERCENT_SUGGEST_URL or "")
     return "%s://%s" % (parts.scheme, parts.netloc) if parts.scheme and parts.netloc else ""
@@ -1027,7 +1027,7 @@ class Controller(NSObject):
         self.answer.setFont_(NSFont.systemFontOfSize_(14))
         self.answer.setDrawsBackground_(False)
         self.answer.setEditable_(False)
-        self.answer.setDelegate_(self)   # row 44: a To Derp item link steps the panel aside
+        self.answer.setDelegate_(self)   # an item link from the task app steps the panel aside
         self.answer.setTextContainerInset_((16, 12))
         self.answer.setTextColor_(NSColor.labelColor())
         self.scroll.setDocumentView_(self.answer)
@@ -1449,7 +1449,7 @@ class Controller(NSObject):
     @objc.python_method
     def _list_items(self, line, t):
         """Row 40: every open item a `$` line matches, with its status; read-only, the line stays
-        in the field so a status can still be added. Row 44: an item the running To Derp page sent
+        in the field so a status can still be added. An item the running task app sent
         an `open` path for is a link to it there; with the page down, a dim line says why there are none."""
         items, base = t.get("items") or [], _toderp_origin()
         out = NSMutableAttributedString.alloc().init()
@@ -1471,7 +1471,7 @@ class Controller(NSObject):
         if many and int(many.group(1)) > len(items):
             add("\nshowing %d of %s: type more to narrow" % (len(items), many.group(1)), body_attributes())
         if items and base and not t.get("live"):
-            add("\n\nTo Derp isn't running: start it to open an item",
+            add("\n\nThe task app isn't running: start it to open an item",
                 {NSFontAttributeName: NSFont.systemFontOfSize_(12),
                  NSForegroundColorAttributeName: NSColor.secondaryLabelColor()})
         prefix = "\n\n" if self.answer.string() else ""
@@ -1480,7 +1480,7 @@ class Controller(NSObject):
         self._grow()
 
     def textView_clickedOnLink_atIndex_(self, view, link, index):
-        """Row 44: a To Derp item link opens in the browser and the panel steps aside; any other
+        """An item link from the task app opens in the browser and the panel steps aside; any other
         link (Sources) opens as before."""
         url = str(link.absoluteString() if hasattr(link, "absoluteString") else link)
         base = _toderp_origin()
