@@ -17,7 +17,9 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
     %         hand the line to your own command (optional: PERCENT_COMMAND in derpderp_config.py);
               with PERCENT_SUGGEST_COMMAND set, a `#` path's predicted name shows greyed, ` takes it;
               PERCENT_SUGGEST_URL asks a running app for the same answer first (faster);
-              with PERCENT_MAKE_COMMAND set, Enter on a path not made yet asks "Make it? Y / N"
+              with PERCENT_MAKE_COMMAND set, Enter on a path not made yet asks "Make it? Y / N";
+              with PERCENT_SET_COMMAND set, Enter on a line whose name names one open item and
+              gives a status asks "Sets <item> → <status>. Set it? Y / N"
     $         with PERCENT_COMMAND set: a status line, handed over whole ("$ <item> done"); the
               suggest answer offers matching items (` takes one) and says what's missing
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
@@ -127,11 +129,12 @@ PERCENT_COMMAND = ""
 PERCENT_SUGGEST_COMMAND = ""
 PERCENT_SUGGEST_URL = ""
 PERCENT_MAKE_COMMAND = ""
+PERCENT_SET_COMMAND = ""
 SETTING_NAMES = (
     "GROQ_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY", "GROQ_MODEL", "GEMINI_MODEL",
     "GEMINI_DAILY_LIMIT", "TAVILY_MONTHLY_LIMIT", "RIGHT_CMD_KEYCODE", "DOUBLE_TAP_TIMEOUT",
     "USAGE_FILE", "LOCK_FILE", "HISTORY_FILE", "SNIPPETS_FILE", "KEEP_ANSWER_MINUTES", "PERCENT_COMMAND",
-    "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL", "PERCENT_MAKE_COMMAND",
+    "PERCENT_SUGGEST_COMMAND", "PERCENT_SUGGEST_URL", "PERCENT_MAKE_COMMAND", "PERCENT_SET_COMMAND",
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "derpderp_config.py")
@@ -201,6 +204,7 @@ PERCENT_COMMAND = load_secret("DERPDERP_PERCENT_COMMAND") or PERCENT_COMMAND
 PERCENT_SUGGEST_COMMAND = load_secret("DERPDERP_PERCENT_SUGGEST_COMMAND") or PERCENT_SUGGEST_COMMAND
 PERCENT_SUGGEST_URL = load_secret("DERPDERP_PERCENT_SUGGEST_URL") or PERCENT_SUGGEST_URL
 PERCENT_MAKE_COMMAND = load_secret("DERPDERP_PERCENT_MAKE_COMMAND") or PERCENT_MAKE_COMMAND
+PERCENT_SET_COMMAND = load_secret("DERPDERP_PERCENT_SET_COMMAND") or PERCENT_SET_COMMAND
 
 # ============================================================================
 #  NOTES  ───  IF YOU'RE ALSO A CLUELESS VIBE CODER....
@@ -979,7 +983,7 @@ class Controller(NSObject):
         self.typed = None         # the suggest command's answer for the `% ` line in the field
         self.choice = 0           # which of its suggested names is offered (↑ / ↓)
         self.suggest_seq = 0      # bumped on every edit: an answer for older text is dropped
-        self.asking = False       # "Make it? Y / N" is up for the line in the field
+        self.asking = False       # a Y / N is up for the line in the field: "make" or "set" (else False)
         self.naming = None        # ☆ pressed: the text waiting for a snippet name typed in the field
         self.enter_waits = None   # Enter came before that line's hint: decide when it arrives
         self.in_flight = None     # (seq, line) of the lookup running now, so Enter never asks twice
@@ -1304,7 +1308,8 @@ class Controller(NSObject):
             if dollar and not line[2:].strip():
                 return
             if ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and not self._current_hint()
-                    and (dollar or (PERCENT_MAKE_COMMAND and "#" in line))):
+                    and (dollar or (PERCENT_MAKE_COMMAND and "#" in line)
+                         or (PERCENT_SET_COMMAND and "$" in line[2:]))):
                 if self.enter_waits != line:   # its hint isn't here yet: say so, decide on the answer
                     self.enter_waits = line
                     self.ghost.setHidden_(True)
@@ -1585,7 +1590,8 @@ class Controller(NSObject):
     @objc.python_method
     def _percent_enter(self, line):
         """Enter on a `% ` / `$ ` line: a `$` line its hint says isn't ready stays put (the hint says
-        why); a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND); else run it."""
+        why); a `#` path not made yet asks Y / N (with PERCENT_MAKE_COMMAND), and so does a line
+        naming one open item with a status (with PERCENT_SET_COMMAND); else run it."""
         t = self._current_hint()
         if line.startswith("$ "):
             if t and t.get("mode") == "status" and t.get("problem"):
@@ -1596,7 +1602,11 @@ class Controller(NSObject):
             self._run_percent(line.strip(), shown=line.strip())
             return
         if PERCENT_MAKE_COMMAND and t and t["place"].get("state") == "missing":
-            self.asking = True
+            self.asking = "make"
+            self._show_hint()
+            return
+        if PERCENT_SET_COMMAND and t and t.get("match"):   # row 46: its name names one open item
+            self.asking = "set"
             self._show_hint()
             return
         self._run_percent(line[2:].strip())
@@ -1652,10 +1662,10 @@ class Controller(NSObject):
         return True
 
     @objc.python_method
-    def _run_percent(self, line, make=False, shown=None):
-        """Run PERCENT_COMMAND (PERCENT_MAKE_COMMAND for a Y) with `line` as its last argument and show
-        what it printed."""
-        command = PERCENT_MAKE_COMMAND if make else PERCENT_COMMAND
+    def _run_percent(self, line, make=False, shown=None, set_item=False):
+        """Run PERCENT_COMMAND (PERCENT_MAKE_COMMAND / PERCENT_SET_COMMAND for a Y) with `line` as its
+        last argument and show what it printed."""
+        command = PERCENT_MAKE_COMMAND if make else PERCENT_SET_COMMAND if set_item else PERCENT_COMMAND
         if not line:
             return
         self._begin()
@@ -1779,6 +1789,10 @@ class Controller(NSObject):
         ok = (data.get("mode") == "file" and isinstance(place, dict)
               and isinstance(place.get("suggest", []), list)) if place else False
         plain = isinstance(data, dict) and data.get("mode") in ("add", "remind") and place is None
+        if plain:   # row 46: the one open item the line's name names, when it gives a status
+            m = data.get("match")
+            if not (isinstance(m, dict) and isinstance(m.get("path"), str) and isinstance(m.get("sets"), str)):
+                data = dict(data, match=None)
         status = (isinstance(data, dict) and data.get("mode") == "status" and isinstance(data.get("items"), list)
                   and all(isinstance(i, dict) and isinstance(i.get("path"), str) for i in data["items"]))
         self.typed = (dict(data, q=line, live=live) if ok else dict(data, q=line, place={}, live=live)
@@ -1887,6 +1901,15 @@ class Controller(NSObject):
                     tip += " · Enter lists them"
             elif t.get("status"):
                 tip += " · Enter sets it to %s" % t["status"]
+            self.ghost.setHidden_(True)
+            self._show_tip(tip)
+            return
+        m = t.get("match") if PERCENT_SET_COMMAND else None
+        if t.get("mode") in ("add", "remind") and m:   # row 46: the line names one open item
+            item = m.get("display") or m["path"]
+            tip = ("Sets %s → %s. Set it? Y / N · N adds the line to Sort later as new" % (item, m["sets"])
+                   if self.asking == "set" else
+                   "→ %s (%s) · Enter asks to set it to %s" % (item, m.get("state") or "", m["sets"]))
             self.ghost.setHidden_(True)
             self._show_tip(tip)
             return
@@ -2078,12 +2101,14 @@ class Controller(NSObject):
             return None
         # "Make it? Y / N" is up: Y makes the path and files the line, N runs it as typed, any
         # other key (Enter aside, which keeps asking) drops the question and does its usual thing.
+        # "Set it? Y / N" (row 46) is the same, Y setting the item the line names.
         if self.asking and not (event.modifierFlags() & NSEventModifierFlagCommand):
             k = (event.charactersIgnoringModifiers() or "").lower()
             if k in ("y", "n") and self._current_hint():
                 line = self.input.stringValue()
-                self.asking = False
-                self._run_percent(line[2:].strip(), make=(k == "y"))
+                kind, self.asking = self.asking, False
+                self._run_percent(line[2:].strip(), make=(k == "y" and kind == "make"),
+                                  set_item=(k == "y" and kind == "set"))
                 return None
             if event.keyCode() not in RETURN_KEYCODES:
                 self.asking = False

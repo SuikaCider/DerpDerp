@@ -78,3 +78,10 @@ PERCENT_SUGGEST_URL = ""
 #   PERCENT_MAKE_COMMAND = "python3 /path/to/add_note.py --make"
 # A DERPDERP_PERCENT_MAKE_COMMAND environment variable (or ~/.secrets line) wins.
 PERCENT_MAKE_COMMAND = ""
+# Optional, for a tool whose suggest answer can say a line's name names one existing item
+# ("match": {"path", "display", "state", "sets"}, for a line that gives a status): Enter then
+# asks "Sets <item> → <status>. Set it? Y / N". Y runs this command with the line; N runs
+# PERCENT_COMMAND as for any line. Example:
+#   PERCENT_SET_COMMAND = "python3 /path/to/add_note.py --set"
+# A DERPDERP_PERCENT_SET_COMMAND environment variable (or ~/.secrets line) wins.
+PERCENT_SET_COMMAND = ""
