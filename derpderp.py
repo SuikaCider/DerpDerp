@@ -307,7 +307,8 @@ HELP = (
         "\t\t`$wip`\tstatus, on a `#` (or `$next`, `$waiting`, `$done`)",
         "\t\t`*pin`\tpin it, on a `#`",
         "\te.g.\t`% draft brief #vibe/campaigns | [doc](https://…) $wip *pin`",
-        "`$`\tSet an item's status",
+        "`$`\tSet an item's status, or find one",
+        "\t\t`$ {name}`\tEnter lists the open items it matches",
         "\t\t`$ {name} done`\tor `wip`, `next`, `waiting`, `killed {why}`",
     )),
 )
@@ -1424,6 +1425,8 @@ class Controller(NSObject):
         t = self._current_hint()
         if line.startswith("$ "):
             if t and t.get("mode") == "status" and t.get("problem"):
+                if not t.get("status"):   # row 40: no status typed: list what it matches, change nothing
+                    self._list_items(line.strip(), t)
                 self._show_hint()
                 return
             self._run_percent(line.strip(), shown=line.strip())
@@ -1433,6 +1436,21 @@ class Controller(NSObject):
             self._show_hint()
             return
         self._run_percent(line[2:].strip())
+
+    @objc.python_method
+    def _list_items(self, line, t):
+        """Row 40: every open item a `$` line matches, with its status; read-only, the line stays
+        in the field so a status can still be added."""
+        items = t.get("items") or []
+        rows = [" · ".join(x for x in (i.get("display") or i["path"], i.get("state")) if x) for i in items]
+        if not rows:
+            rows = ["No open item matches \u201c%s\u201d" % (t.get("partial") or line[2:].strip())]
+        many = re.match(r"(\d+) open items match", t.get("problem") or "")
+        if many and int(many.group(1)) > len(items):
+            rows.append("showing %d of %s: type more to narrow" % (len(items), many.group(1)))
+        prefix = "\n\n" if self.answer.string() else ""
+        self._say("%s\u203a %s\n\n%s" % (prefix, line, "\n".join(rows)))
+        self._grow()
 
     @objc.python_method
     def _run_percent(self, line, make=False, shown=None):
@@ -1657,6 +1675,8 @@ class Controller(NSObject):
                     tip += " · ` takes it" + (" (%d of %d, ↑/↓)" % (k + 1, len(items)) if len(items) > 1 else "")
             if problem:
                 tip += (" · " if tip else "") + problem
+                if len(items) > 1 and not t.get("status"):
+                    tip += " · Enter lists them"
             elif t.get("status"):
                 tip += " · Enter sets it to %s" % t["status"]
             self.ghost.setHidden_(True)
