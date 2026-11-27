@@ -26,7 +26,8 @@ Type a question and press Return. Prefix modifiers (see /help in the panel):
 Flags combine in any order: \wc ipa of prendre. ↑ recalls earlier questions,
 ⌘↩ copies the answer and closes (on a typed line: asks it first), /history
 shows the last 10 answers. ☆ (⌘S) keeps an answer, or the part of it you selected, as a
-named snippet; the name typed alone copies its text, offline. /snippets lists them.
+named snippet; `;name` shows its text (⌘↩ copies it), offline, and `;` greys in the
+names as you type. /snippets lists them.
 
 ──────────────────────────────────────────────────────────────────────────
 SETUP (3 steps)
@@ -317,7 +318,8 @@ HELP = (
         "\t`⌘↩` copies the answer and closes the panel (after a typed question: asks it first)",
         "\t`/history` shows your last 10 questions and answers",
         "`⌘S`\tKeep the answer as a snippet (☆); select part of it first to keep just that",
-        "\tType a snippet's name and `↩` copies it; `/snippets` lists them",
+        "`;`\tA snippet: `;name` `↩` shows it, `⌘↩` copies it",
+        "\tType after `;` and its names grey in (the backtick key takes one); `/snippets` lists them",
         "\tThe backtick key takes the greyed name on a `%` or `$` line (`↑`/`↓`: the others)",
     )),
     ("ESTATE", "(if you're using my other task management tools)", (
@@ -354,7 +356,7 @@ def dollar_prefix(line):
 
 
 # ---- Snippets (row 41): a kept answer's exact text under a name; the name typed alone copies it.
-SNIPPET_NAME_BAD = ("%", "$", "\\", "/")   # a name can't start like a `%` / `$` line, a modifier or a command
+SNIPPET_NAME_BAD = ("%", "$", "\\", "/", ";")   # not like a `%` / `$` line, a modifier, a command or `;`
 
 
 def snippet_key(name):
@@ -386,6 +388,24 @@ def find_snippet(line):
         if snippet_key(name) == key:
             return name, text
     return None
+
+
+def snippet_line(line):
+    """Row 48: the name part of a `;name` line (snippets on), else None. `;` alone gives ""."""
+    if not SNIPPETS_FILE or not line.startswith(";"):
+        return None
+    return line[1:].lstrip()
+
+
+def snippet_names(partial):
+    """The kept names that start with `partial` (case and extra spaces ignored), an exact one first;
+    None when the file can't be read."""
+    snippets = load_snippets()
+    if snippets is None:
+        return None
+    key = snippet_key(partial)
+    names = [n for n in snippets if snippet_key(n).startswith(key)]
+    return sorted(names, key=lambda n: snippet_key(n) != key)
 
 
 def save_snippet(name, text):
@@ -1317,12 +1337,13 @@ class Controller(NSObject):
             self._show_snippets()
             return
 
-        # Row 41: a line that is exactly a snippet's name copies its text and closes; nothing is asked.
-        hit = find_snippet(question)
-        if hit:
-            self.input.setStringValue_("")
-            self._copy_to_clipboard(hit[1])
-            self.hide()
+        # Row 48: `;name` shows that snippet's text (⌘↩: copies it and closes); nothing is asked online.
+        if snippet_line(question) is not None:
+            hit = find_snippet(snippet_line(question))
+            if hit:
+                self._show_snippet(*hit)
+            else:
+                self._show_tip("☆ No snippet called \u201c%s\u201d · /snippets lists them" % snippet_line(question))
             return
 
         # `% ` — hand the line to PERCENT_COMMAND; no LLM. A `#` path not made yet asks first.
@@ -1536,7 +1557,20 @@ class Controller(NSObject):
         self.naming = None
         self.input.setStringValue_("")
         self._show_tip("☆ Not kept: " + problem if problem else
-                       "☆ Kept as \u201c%s\u201d · type it and ↩ copies it" % name)
+                       "☆ Kept as \u201c%s\u201d · ;%s ↩ shows it, ⌘↩ copies it" % (name, name))
+
+    @objc.python_method
+    def _show_snippet(self, name, text):
+        """Row 48: a snippet's text as the answer, so ⌘C / ⌘↩ copy it. No API call."""
+        self.input.setStringValue_("")
+        self._typed_changed()
+        self.answer.setString_("")
+        self._grow()
+        self._say("\u203a ;%s\n\n" % name)
+        self._say(text)
+        self.last_answer = text
+        self.copybtn.setHidden_(False)
+        self.keepbtn.setHidden_(True)
 
     @objc.python_method
     def _show_snippets(self):
@@ -1566,7 +1600,7 @@ class Controller(NSObject):
             first = (text.strip().splitlines() or [""])[0]
             add(("\n" if n else "") + name, link)
             add("   " + (first if len(first) <= 60 else first[:59] + "…"), dim)
-        add("\n\nClick one to copy it, or type its name and ↩", dim)
+        add("\n\nClick one to copy it, or type ;name and ↩ shows it", dim)
         self._append(out, jump=True)
 
     @objc.python_method
@@ -1764,6 +1798,12 @@ class Controller(NSObject):
         self.suggest_seq += 1
         seq, line = self.suggest_seq, self.input.stringValue()
         self.ghost.setHidden_(True)
+        if snippet_line(line) is not None:   # row 48: the names a `;` line starts, local
+            names = snippet_names(snippet_line(line))
+            self.typed = {"q": line, "mode": "snippet", "place": {}, "names": names}
+            self.choice = 0
+            self._show_hint()
+            return
         typed = (line.startswith("% ") and line[2:].strip()) or (PERCENT_COMMAND and dollar_line(line))
         if not ((PERCENT_SUGGEST_URL or PERCENT_SUGGEST_COMMAND) and typed):
             self.typed = None
@@ -1844,6 +1884,8 @@ class Controller(NSObject):
         """What ` and ↑ / ↓ work on: ("day", words) while a partial @day is offered (ahead of any
         `#` names), else ("name", the `#` path's names)."""
         t = self.typed or {}
+        if t.get("mode") == "snippet":   # row 48: a `;` line's names
+            return "snippet", t.get("names") or []
         if t.get("days"):
             return "day", [o["word"] for o in t["days"]["options"]]
         if t.get("mode") == "status":   # a `$` line: the items, until a status is typed
@@ -1897,12 +1939,27 @@ class Controller(NSObject):
         t = self._current_hint() if self.typed else None
         if not t:
             self.ghost.setHidden_(True)
-            hit = find_snippet(self.input.stringValue()) if self.typed is None else None
-            if hit:
-                self._show_tip("☆ ↩ copies your snippet \u201c%s\u201d" % hit[0])
-            elif self.typed is None:   # typed on with a hint up: keep it until the new answer
+            if self.typed is None:   # typed on with a hint up: keep it until the new answer
                 self.tip.setHidden_(True)
                 self._set_tip_h(0)
+            return
+        if t.get("mode") == "snippet":   # row 48: the name offered, and what ↩ does with it
+            names, partial = t.get("names"), snippet_line(t["q"])
+            if names is None:
+                tip, rest = "☆ %s can't be read" % SNIPPETS_FILE, ""
+            elif not names:
+                tip, rest = ("☆ No snippet starts with \u201c%s\u201d · /snippets lists them" % partial
+                             if load_snippets() else "☆ No snippets yet · ⌘S on an answer keeps one"), ""
+            else:
+                k = self.choice % len(names)
+                name = names[k]
+                tip = ("☆ \u201c%s\u201d · ↩ shows it · ⌘↩ copies it" % name
+                       if snippet_key(name) == snippet_key(partial) else "☆ \u201c%s\u201d · ` takes it" % name)
+                if len(names) > 1:
+                    tip += " (%d of %d, ↑/↓)" % (k + 1, len(names))
+                rest = name[len(partial):] if name.casefold().startswith(partial.casefold()) else ""
+            self._show_tip(tip)
+            self._draw_ghost(t["q"], rest)
             return
         p, day, name = t["place"], t.get("day"), self._suggestion()
         kind, names = self._offers()
@@ -1984,7 +2041,11 @@ class Controller(NSObject):
         if not t or not name:
             return False
         line = t["q"]
-        if self._offers()[0] == "item":   # a `$` line: the item's path, then a space for the status
+        if self._offers()[0] == "snippet":   # row 48: the whole name after the `;`
+            if snippet_key(name) == snippet_key(snippet_line(line)):
+                return False   # already typed: ` types a `
+            self.input.setStringValue_(";" + name)
+        elif self._offers()[0] == "item":   # a `$` line: the item's path, then a space for the status
             lookup = line.startswith("$! ")   # row 47: a `$!` lookup takes no status
             self.input.setStringValue_(dollar_prefix(line) + name + ("" if lookup else " "))
         elif self._offers()[0] == "day":   # the partial @day becomes the word, then a space
@@ -2151,12 +2212,20 @@ class Controller(NSObject):
         ):
             return None
         # ⌘↩ on a typed line asks it, then copies the answer and closes once it's done.
+        # On a `;name` line (row 48): copies that snippet and closes.
         if (
             event.keyCode() in RETURN_KEYCODES
             and (event.modifierFlags() & NSEventModifierFlagCommand)
             and self.input.stringValue().strip()
             and not self.answering
         ):
+            name = snippet_line(self.input.stringValue().strip())
+            hit = find_snippet(name) if name is not None else None
+            if hit:
+                self.input.setStringValue_("")
+                self._copy_to_clipboard(hit[1])
+                self.hide()
+                return None
             self.submit()
             self.close_when_done = self.answering   # a hint or /help asks nothing: stay open
             return None
